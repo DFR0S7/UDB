@@ -344,7 +344,7 @@ function buildCommands() {
         sub.setName('edit')
           .setDescription('Edit a specific config value')
           .addStringOption(o => o.setName('setting').setDescription('Setting name').setRequired(true).setAutocomplete(true))
-          .addStringOption(o => o.setName('value').setDescription('New value').setRequired(true))
+          .addStringOption(o => o.setName('value').setDescription('New value').setRequired(true).setAutocomplete(true))
       ),
 
     new SlashCommandBuilder()
@@ -381,7 +381,7 @@ function buildCommands() {
       .setName('move-coach')
       .setDescription('Move a coach from one team to another (Admin only)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addUserOption(o => o.setName('user').setDescription('Coach to move').setRequired(true))
+      .addStringOption(o => o.setName('coach').setDescription('Coach to move').setRequired(true).setAutocomplete(true))
       .addStringOption(o => o.setName('new-team').setDescription('Destination team').setRequired(true).setAutocomplete(true)),
 
     new SlashCommandBuilder()
@@ -1583,35 +1583,96 @@ async function handleResetTeam(interaction) {
 async function handleListTeams(interaction) {
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
-  const teams   = await getAllTeams(guildId);
+  await interaction.deferReply({ flags: 64 });
 
-  const taken     = teams.filter(t => t.user_id);
-  const available = teams.filter(t => !t.user_id);
+  const allTeams = await getAllTeams(guildId);
 
-  const takenLines = taken.length > 0
-    ? taken.map(t => `✅ **${t.team_name}** — <@${t.user_id}>`).join('\n')
-    : '_None_';
+  // Filter to only teams within the configured star rating range
+  const minRating = config.star_rating_for_offers || 0;
+  const maxRating = config.star_rating_max_for_offers || 999;
+  const teams = allTeams.filter(t => {
+    const r = parseFloat(t.star_rating) || 0;
+    // Always include taken teams regardless of rating so coaches show on the list
+    if (t.user_id) return true;
+    return r >= minRating && r <= maxRating;
+  });
 
-  const availLines = available.length > 0
-    ? available.map(t => `⬜ **${t.team_name}**${t.star_rating ? ` (${t.star_rating}⭐)` : ''}`).join('\n')
-    : '_None — all teams taken!_';
+  // Group by conference
+  const confMap = {};
+  for (const t of teams) {
+    const conf = t.conference || 'Independent';
+    if (!confMap[conf]) confMap[conf] = [];
+    confMap[conf].push(t);
+  }
 
-  const embed = new EmbedBuilder()
-    .setTitle(`📋 ${config.league_name} — Team List`)
-    .setColor(config.embed_color_primary_int)
-    .addFields(
-      { name: `✅ Taken Teams (${taken.length})`, value: takenLines.substring(0, 1024), inline: false },
-      { name: `⬜ Available Teams (${available.length})`, value: availLines.substring(0, 1024), inline: false },
-    )
-    .setFooter({ text: 'Contact an admin to join the league!' })
-    .setTimestamp();
+  // Build embeds — one per conference group, split if too long
+  const embeds = [];
+  const fields = [];
 
+  for (const [conf, confTeams] of Object.entries(confMap).sort()) {
+    const lines = confTeams
+      .sort((a, b) => (b.star_rating || 0) - (a.star_rating || 0))
+      .map(t => {
+        if (t.user_id) {
+          return `🏈 **${t.team_name}** — <@${t.user_id}> (${t.star_rating || '?'}⭐)`;
+        }
+        return `🟢 **${t.team_name}** — Available (${t.star_rating || '?'}⭐)`;
+      });
+
+    // Split conference into chunks of 15 to stay under 1024 chars
+    for (let i = 0; i < lines.length; i += 15) {
+      const chunk = lines.slice(i, i + 15);
+      fields.push({
+        name: i === 0 ? `__${conf}__` : `__${conf} (cont.)__`,
+        value: chunk.join('\n'),
+        inline: false,
+      });
+    }
+  }
+
+  // Discord allows max 25 fields per embed — split into multiple embeds if needed
+  const chunkSize = 25;
+  for (let i = 0; i < fields.length; i += chunkSize) {
+    const embed = new EmbedBuilder()
+      .setColor(config.embed_color_primary_int)
+      .addFields(fields.slice(i, i + chunkSize));
+
+    if (i === 0) {
+      const taken = teams.filter(t => t.user_id).length;
+      const avail = teams.filter(t => !t.user_id).length;
+      embed
+        .setTitle(`📋 ${config.league_name} — Team List`)
+        .setDescription(`**${taken}** coaches signed · **${avail}** teams available\nShowing teams rated **${minRating}⭐${maxRating < 999 ? ' – ' + maxRating + '⭐' : '+'}**`)
+        .setTimestamp();
+    }
+
+    embeds.push(embed);
+  }
+
+  if (embeds.length === 0) {
+    return interaction.editReply('No teams found. Make sure teams are loaded in the database.');
+  }
+
+  // Find the team-lists channel and clean old bot messages before posting
   const listsChannel = findTextChannel(interaction.guild, config.channel_team_lists);
+  const target = listsChannel || interaction.channel;
+
+  // Clean old bot messages in the channel (up to last 100)
+  try {
+    const messages = await target.messages.fetch({ limit: 100 });
+    const botMsgs  = messages.filter(m => m.author.id === client.user.id);
+    for (const m of botMsgs.values()) await m.delete().catch(() => {});
+  } catch { /* ignore cleanup errors */ }
+
+  // Post all embeds
+  for (const embed of embeds) {
+    await target.send({ embeds: [embed] });
+  }
+
   if (listsChannel && listsChannel.id !== interaction.channelId) {
-    await listsChannel.send({ embeds: [embed] });
-    await interaction.reply({ content: `✅ Team list posted in ${listsChannel}!`, flags: 64 });
+    await interaction.editReply(`✅ Team list posted in ${listsChannel}!`);
   } else {
-    await interaction.reply({ embeds: [embed] });
+    await interaction.editReply('✅ Team list posted!');
   }
 }
 
@@ -1750,8 +1811,11 @@ async function handleSeasonAdvance(interaction) {
 async function handleMoveCoach(interaction) {
   const guildId   = interaction.guildId;
   const config    = await getConfig(guildId);
-  const user      = interaction.options.getUser('user');
+  const coachId   = interaction.options.getString('coach');
+  const user      = await interaction.guild.members.fetch(coachId).then(m => m.user).catch(() => null);
   const newTeamName = interaction.options.getString('new-team');
+
+  if (!user) return interaction.editReply('❌ Could not find that coach. They may have left the server.');
 
   await interaction.deferReply();
 
@@ -1799,7 +1863,7 @@ async function handleAutocomplete(interaction) {
 
   let choices = [];
 
-  if (commandName === 'assign-team' || commandName === 'any-game-result' || commandName === 'move-coach') {
+  if (commandName === 'assign-team' || commandName === 'any-game-result') {
     // Show all global teams (unfiltered — admin commands)
     const { data: teams } = await supabase
       .from('teams')
@@ -1812,6 +1876,46 @@ async function handleAutocomplete(interaction) {
       name: `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
       value: t.team_name,
     }));
+  }
+
+  else if (commandName === 'move-coach') {
+    if (focused.name === 'coach') {
+      // Show currently assigned coaches in this guild
+      const { data: assignments } = await supabase
+        .from('team_assignments')
+        .select('user_id, team_id, teams(team_name)')
+        .eq('guild_id', guildId);
+
+      // Fetch display names from guild
+      const guild = client.guilds.cache.get(guildId);
+      const memberChoices = [];
+      for (const a of (assignments || [])) {
+        try {
+          const member = await guild.members.fetch(a.user_id).catch(() => null);
+          if (!member) continue;
+          const displayName = member.displayName;
+          if (!displayName.toLowerCase().includes(query)) continue;
+          memberChoices.push({
+            name: `${displayName} — ${a.teams?.team_name || 'Unknown Team'}`,
+            value: a.user_id,
+          });
+        } catch { continue; }
+      }
+      choices = memberChoices.slice(0, 25);
+    } else if (focused.name === 'new-team') {
+      // Show all global teams for destination
+      const { data: teams } = await supabase
+        .from('teams')
+        .select('id, team_name, conference, star_rating')
+        .ilike('team_name', `%${query}%`)
+        .order('team_name')
+        .limit(25);
+
+      choices = (teams || []).map(t => ({
+        name: `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
+        value: t.team_name,
+      }));
+    }
   }
 
   else if (commandName === 'game-result') {
@@ -1850,29 +1954,94 @@ async function handleAutocomplete(interaction) {
 
   else if (commandName === 'config' && focused.name === 'setting') {
     const allSettings = [
-      { name: 'league_name',                  hint: 'League display name' },
-      { name: 'league_abbreviation',          hint: 'Short name for stream detection' },
-      { name: 'channel_news_feed',            hint: 'Channel for results & announcements' },
-      { name: 'channel_advance_tracker',      hint: 'Channel for advance notices' },
-      { name: 'channel_team_lists',           hint: 'Channel for team availability list' },
-      { name: 'channel_signed_coaches',       hint: 'Channel for signing announcements' },
-      { name: 'channel_streaming',            hint: 'Channel to monitor for stream links' },
-      { name: 'role_head_coach',              hint: 'Role name assigned to coaches' },
-      { name: 'star_rating_for_offers',       hint: 'Minimum star rating for job offers' },
-      { name: 'star_rating_max_for_offers',   hint: 'Maximum star rating for job offers' },
-      { name: 'job_offers_count',             hint: 'Number of offers per user' },
-      { name: 'job_offers_expiry_hours',      hint: 'Hours before offers expire (1–24)' },
-      { name: 'stream_reminder_minutes',      hint: 'Minutes before stream reminder fires' },
-      { name: 'advance_intervals',            hint: 'Available advance intervals e.g. [24,48]' },
-      { name: 'embed_color_primary',          hint: 'Primary embed color hex e.g. 0x1e90ff' },
-      { name: 'embed_color_win',              hint: 'Win result embed color hex' },
-      { name: 'embed_color_loss',             hint: 'Loss result embed color hex' },
+      { label: 'League Name',             key: 'league_name',                  hint: 'League display name' },
+      { label: 'League Abbreviation',     key: 'league_abbreviation',          hint: 'Short name for stream detection' },
+      { label: 'News Feed Channel',       key: 'channel_news_feed',            hint: 'Channel for results & announcements' },
+      { label: 'Advance Tracker Channel', key: 'channel_advance_tracker',      hint: 'Channel for advance notices' },
+      { label: 'Team Lists Channel',      key: 'channel_team_lists',           hint: 'Channel for team availability list' },
+      { label: 'Signed Coaches Channel',  key: 'channel_signed_coaches',       hint: 'Channel for signing announcements' },
+      { label: 'Streaming Channel',       key: 'channel_streaming',            hint: 'Channel to monitor for stream links' },
+      { label: 'Head Coach Role',         key: 'role_head_coach',              hint: 'Role assigned to coaches' },
+      { label: 'Min Star Rating',         key: 'star_rating_for_offers',       hint: 'Minimum star rating for job offers' },
+      { label: 'Max Star Rating',         key: 'star_rating_max_for_offers',   hint: 'Maximum star rating for job offers' },
+      { label: 'Offers Per User',         key: 'job_offers_count',             hint: 'Number of offers per user' },
+      { label: 'Offer Expiry Hours',      key: 'job_offers_expiry_hours',      hint: 'Hours before offers expire (1–24)' },
+      { label: 'Stream Reminder Minutes', key: 'stream_reminder_minutes',      hint: 'Minutes before stream reminder fires' },
+      { label: 'Advance Intervals',       key: 'advance_intervals',            hint: 'Available advance intervals e.g. [24,48]' },
+      { label: 'Primary Embed Color',     key: 'embed_color_primary',          hint: 'Primary embed color hex e.g. 0x1e90ff' },
+      { label: 'Win Embed Color',         key: 'embed_color_win',              hint: 'Win result embed color hex' },
+      { label: 'Loss Embed Color',        key: 'embed_color_loss',             hint: 'Loss result embed color hex' },
     ];
 
     choices = allSettings
-      .filter(s => s.name.includes(query) || s.hint.toLowerCase().includes(query))
+      .filter(s =>
+        s.label.toLowerCase().includes(query) ||
+        s.key.includes(query) ||
+        s.hint.toLowerCase().includes(query)
+      )
       .slice(0, 25)
-      .map(s => ({ name: `${s.name} — ${s.hint}`, value: s.name }));
+      .map(s => ({ name: `${s.label} — ${s.hint}`, value: s.key }));
+  }
+
+  else if (commandName === 'config' && focused.name === 'value') {
+    // Get the currently selected setting to know what kind of value to suggest
+    const setting = interaction.options.getString('setting') || '';
+    const guild = client.guilds.cache.get(guildId);
+
+    if (setting.startsWith('channel_') && guild) {
+      // Suggest text channels
+      const channels = guild.channels.cache
+        .filter(c => c.type === 0 && c.name.toLowerCase().includes(query))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(c => ({ name: `#${c.name}`, value: c.name }));
+      choices = [...channels].slice(0, 25);
+
+    } else if (setting === 'role_head_coach' && guild) {
+      // Suggest roles
+      const roles = guild.roles.cache
+        .filter(r => !r.managed && r.name !== '@everyone' && r.name.toLowerCase().includes(query))
+        .sort((a, b) => b.position - a.position)
+        .map(r => ({ name: `@${r.name}`, value: r.name }));
+      choices = [...roles].slice(0, 25);
+
+    } else if (setting === 'star_rating_for_offers' || setting === 'star_rating_max_for_offers') {
+      // Suggest common star ratings
+      choices = ['1.0','1.5','2.0','2.5','3.0','3.5','4.0','4.5','5.0']
+        .filter(v => v.includes(query))
+        .map(v => ({ name: `${v} stars`, value: v }));
+
+    } else if (setting === 'job_offers_expiry_hours') {
+      choices = ['1','2','4','6','8','12','16','24']
+        .filter(v => v.includes(query))
+        .map(v => ({ name: `${v} hours`, value: v }));
+
+    } else if (setting === 'job_offers_count') {
+      choices = ['1','2','3','4','5']
+        .filter(v => v.includes(query))
+        .map(v => ({ name: `${v} offers`, value: v }));
+
+    } else if (setting === 'stream_reminder_minutes') {
+      choices = ['15','30','45','60','90','120']
+        .filter(v => v.includes(query))
+        .map(v => ({ name: `${v} minutes`, value: v }));
+
+    } else if (setting === 'advance_intervals') {
+      choices = ['[24, 48]','[12, 24, 48]','[24]','[48]','[6, 12, 24, 48]']
+        .filter(v => v.includes(query))
+        .map(v => ({ name: v, value: v }));
+
+    } else if (setting.startsWith('embed_color_')) {
+      choices = [
+        { name: 'Blue (default)',  value: '0x1e90ff' },
+        { name: 'Green',           value: '0x00ff00' },
+        { name: 'Red',             value: '0xff0000' },
+        { name: 'Gold',            value: '0xffd700' },
+        { name: 'Purple',          value: '0x9b59b6' },
+        { name: 'Orange',          value: '0xff8c00' },
+        { name: 'White',           value: '0xffffff' },
+        { name: 'Black',           value: '0x000000' },
+      ].filter(c => c.name.toLowerCase().includes(query) || c.value.includes(query));
+    }
   }
 
   await interaction.respond(choices);
