@@ -590,7 +590,7 @@ async function handleSetup(interaction) {
   };
 
   // ── Job Offers follow-up ──────────────────────────────────────────────────
-  let jobOffersConfig = { star_rating_for_offers: 2.5, star_rating_max_for_offers: null, job_offers_count: 3, job_offers_expiry_hours: 48 };
+  let jobOffersConfig = { star_rating_for_offers: 2.5, star_rating_max_for_offers: null, job_offers_count: 3, job_offers_expiry_hours: 24 };
 
   if (features.feature_job_offers) {
     await dm.send('**— Job Offers Setup —**\nYou enabled job offers. Answer the next 4 questions to configure it.');
@@ -604,14 +604,14 @@ async function handleSetup(interaction) {
     const offersCount = await askWithDefault('**[Job Offers 3/4]** How many offers should each user receive?\nDefault: 3', '3');
     if (!offersCount) return;
 
-    const offersExpiry = await askWithDefault('**[Job Offers 4/4]** How many hours should offers last before expiring?\nDefault: 48', '48');
+    const offersExpiry = await askWithDefault('**[Job Offers 4/4]** How many hours should offers last before expiring? (1 – 24 hours)\nDefault: 24', '24');
     if (!offersExpiry) return;
 
     jobOffersConfig = {
       star_rating_for_offers:     parseFloat(starMin) || 2.5,
       star_rating_max_for_offers: starMax.toLowerCase() === 'none' ? null : (parseFloat(starMax) || null),
       job_offers_count:           parseInt(offersCount) || 3,
-      job_offers_expiry_hours:    parseInt(offersExpiry) || 48,
+      job_offers_expiry_hours:    Math.min(24, Math.max(1, parseInt(offersExpiry) || 24)),
     };
   }
 
