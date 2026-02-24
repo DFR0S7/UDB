@@ -114,6 +114,7 @@ async function createDefaultConfig(guildId, leagueName = 'Dynasty League') {
     channel_streaming: 'streaming',
     role_head_coach: 'head coach',
     star_rating_for_offers: 2.5,
+    star_rating_max_for_offers: null,
     job_offers_count: 3,
     job_offers_expiry_hours: 48,
     stream_reminder_minutes: 45,
@@ -145,6 +146,7 @@ function buildDefaultConfig(guildId, leagueName = 'Dynasty League') {
     role_head_coach: 'head coach',
     role_head_coach_id: null,
     star_rating_for_offers: 2.5,
+    star_rating_max_for_offers: null,
     job_offers_count: 3,
     job_offers_expiry_hours: 48,
     stream_reminder_minutes: 45,
@@ -308,7 +310,7 @@ function buildCommands() {
     new SlashCommandBuilder()
       .setName('game-result')
       .setDescription('Submit your game result')
-      .addStringOption(o => o.setName('opponent').setDescription('Opponent team name').setRequired(true))
+      .addStringOption(o => o.setName('opponent').setDescription('Opponent team name').setRequired(true).setAutocomplete(true))
       .addIntegerOption(o => o.setName('your-score').setDescription('Your score').setRequired(true))
       .addIntegerOption(o => o.setName('opponent-score').setDescription('Opponent score').setRequired(true)),
 
@@ -350,7 +352,7 @@ function buildCommands() {
       .setDescription('Manually assign a team to a user (Admin only)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .addUserOption(o => o.setName('user').setDescription('Discord user').setRequired(true))
-      .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true))
+      .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
       .addBooleanOption(o => o.setName('skip-announcement').setDescription('Skip signing announcement').setRequired(false)),
 
     new SlashCommandBuilder()
@@ -380,14 +382,14 @@ function buildCommands() {
       .setDescription('Move a coach from one team to another (Admin only)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .addUserOption(o => o.setName('user').setDescription('Coach to move').setRequired(true))
-      .addStringOption(o => o.setName('new-team').setDescription('Destination team').setRequired(true)),
+      .addStringOption(o => o.setName('new-team').setDescription('Destination team').setRequired(true).setAutocomplete(true)),
 
     new SlashCommandBuilder()
       .setName('any-game-result')
       .setDescription('Enter a result for any two teams (Admin only)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addStringOption(o => o.setName('team1').setDescription('First team name').setRequired(true))
-      .addStringOption(o => o.setName('team2').setDescription('Second team name').setRequired(true))
+      .addStringOption(o => o.setName('team1').setDescription('First team name').setRequired(true).setAutocomplete(true))
+      .addStringOption(o => o.setName('team2').setDescription('Second team name').setRequired(true).setAutocomplete(true))
       .addIntegerOption(o => o.setName('score1').setDescription('Team 1 score').setRequired(true))
       .addIntegerOption(o => o.setName('score2').setDescription('Team 2 score').setRequired(true)),
   ].map(cmd => cmd.toJSON());
@@ -449,47 +451,132 @@ async function handleSetup(interaction) {
   }
 
   await interaction.reply({ content: '📬 Check your DMs — setup wizard is waiting!', ephemeral: true });
-  await dm.send("👋 **Dynasty Bot Setup Wizard**\nI'll ask you 4 quick questions. You have 2 minutes to answer each one.");
+  await dm.send("👋 **Dynasty Bot Setup Wizard**\nAnswer each question in this DM. You have 2 minutes per question.");
 
-  // Ask a question in DM and wait for the reply in the same DM
+  const guild = interaction.guild;
+
+  // ── Generic ask (free text) ───────────────────────────────────────────────
   const ask = async (question) => {
     await dm.send(question);
     try {
-      const collected = await dm.awaitMessages({
-        filter: m => m.author.id === userId && !m.author.bot,
-        max: 1,
-        time: 120000,   // 2 minutes per question
-        errors: ['time'],
-      });
-      return collected.first().content.trim();
+      const col = await dm.awaitMessages({ filter: m => m.author.id === userId && !m.author.bot, max: 1, time: 120000, errors: ['time'] });
+      return col.first().content.trim();
     } catch {
       await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
       return null;
     }
   };
 
-  // ── Q1: League name ──────────────────────────────────────────────────────
-  const leagueName = await ask(
-    '**Setup (1/4):** What is your league name?\n_Example: CMR Dynasty_'
-  );
+  const askWithDefault = async (question, defaultVal) => {
+    const answer = await ask(question);
+    if (!answer) return null;
+    return answer.toLowerCase() === 'default' ? String(defaultVal) : answer;
+  };
+
+  // ── Pick list helper — sends a numbered list and returns the chosen item ──
+  const askPickList = async (header, items, labelFn) => {
+    const lines = items.map((item, i) => `\`${i + 1}\` — ${labelFn(item)}`);
+    await dm.send(`${header}\n\n${lines.join('\n')}`);
+    try {
+      const col = await dm.awaitMessages({
+        filter: m => m.author.id === userId && !m.author.bot,
+        max: 1, time: 120000, errors: ['time'],
+      });
+      const idx = parseInt(col.first().content.trim()) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= items.length) {
+        await dm.send('❌ Invalid selection. Run `/setup` again to restart.');
+        return null;
+      }
+      return items[idx];
+    } catch {
+      await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+      return null;
+    }
+  };
+
+  // Get all text channels and roles from the guild up front
+  const textChannels = guild.channels.cache
+    .filter(c => c.type === 0) // GuildText
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(c => c);
+
+  const roles = guild.roles.cache
+    .filter(r => !r.managed && r.name !== '@everyone')
+    .sort((a, b) => b.position - a.position)
+    .map(r => r);
+
+  // ── League info ───────────────────────────────────────────────────────────
+  const leagueName = await ask('**[League 1/2]** What is your league name?\nExample: CMR Dynasty');
   if (!leagueName) return;
 
-  // ── Q1b: League abbreviation ──────────────────────────────────────────────
-  const leagueAbbr = await ask(
-    '**Setup (2/4):** What is your league abbreviation or keyword?\nThis will be used to identify your league in stream titles.\n_Example: `CMR`_'
-  );
+  const leagueAbbr = await ask('**[League 2/2]** What is your league abbreviation or keyword?\nThis will be used to identify your league in stream titles.\nExample: CMR');
   if (!leagueAbbr) return;
 
-  // ── Q2: Features ─────────────────────────────────────────────────────────
+  // ── Channels ──────────────────────────────────────────────────────────────
+  await dm.send('**— Channel Setup —**\nSelect your channels from the list. Reply with the number next to each channel.');
+
+  const newsFeedCh = await askPickList(
+    '**[Channel 1/5]** Which channel should game results and announcements post to? (News Feed)',
+    textChannels, c => `#${c.name}`
+  );
+  if (!newsFeedCh) return;
+
+  const signedCh = await askPickList(
+    '**[Channel 2/5]** Which channel should signing announcements post to? (Signed Coaches)',
+    textChannels, c => `#${c.name}`
+  );
+  if (!signedCh) return;
+
+  const teamListCh = await askPickList(
+    '**[Channel 3/5]** Which channel should the team availability list post to? (Team Lists)',
+    textChannels, c => `#${c.name}`
+  );
+  if (!teamListCh) return;
+
+  const advanceCh = await askPickList(
+    '**[Channel 4/5]** Which channel should advance notices post to? (Advance Tracker)',
+    textChannels, c => `#${c.name}`
+  );
+  if (!advanceCh) return;
+
+  const streamCh = await askPickList(
+    '**[Channel 5/5]** Which channel should stream links be monitored in? (Streaming)',
+    textChannels, c => `#${c.name}`
+  );
+  if (!streamCh) return;
+
+  // ── Head Coach Role ───────────────────────────────────────────────────────
+  let headCoachRole;
+  if (roles.length > 0) {
+    headCoachRole = await askPickList(
+      '**— Role Setup —**\nWhich role should be assigned to head coaches?\n(If the role does not exist yet, pick the closest one — you can update it later with `/config edit`)',
+      roles, r => `@${r.name}`
+    );
+    if (!headCoachRole) return;
+  } else {
+    await dm.send('⚠️ No roles found in the server. The bot will create a "head coach" role automatically when the first coach is assigned.');
+  }
+
+  const channelConfig = {
+    channel_news_feed:       newsFeedCh.name,
+    channel_signed_coaches:  signedCh.name,
+    channel_team_lists:      teamListCh.name,
+    channel_advance_tracker: advanceCh.name,
+    channel_streaming:       streamCh.name,
+    role_head_coach:         headCoachRole ? headCoachRole.name : 'head coach',
+    role_head_coach_id:      headCoachRole ? headCoachRole.id   : null,
+  };
+
+  // ── Features ──────────────────────────────────────────────────────────────
   const featureInput = await ask(
-    `**Setup (3/4):** Which features would you like to enable?\n` +
-    `Reply with a comma-separated list of numbers:\n\n` +
-    `\`1\` — Job Offers\n` +
-    `\`2\` — Stream Reminders\n` +
-    `\`3\` — Advance System\n` +
-    `\`4\` — Press Releases\n` +
-    `\`5\` — Rankings\n\n` +
-    `_Example: \`1,2,3,4,5\` for all • \`1,3,5\` for some_`
+    '**— Feature Selection —**\n' +
+    'Which features would you like to enable? Reply with a comma-separated list:\n\n' +
+    '1 — Job Offers\n' +
+    '2 — Stream Reminders\n' +
+    '3 — Advance System\n' +
+    '4 — Press Releases\n' +
+    '5 — Rankings\n\n' +
+    'Example: 1,2,3,4,5 for all'
   );
   if (!featureInput) return;
 
@@ -502,41 +589,107 @@ async function handleSetup(interaction) {
     feature_rankings:         enabled.includes(5),
   };
 
-  // ── Q3: Advance intervals ─────────────────────────────────────────────────
-  const advanceInput = await ask(
-    `**Setup (4/4):** What advance intervals (in hours) do you want available?\n` +
-    `Reply with a JSON array.\n\n` +
-    `_Example: \`[24, 48]\` • \`[12, 24, 48]\`_\n` +
-    `_Type \`default\` to use \`[24, 48]\`_`
-  );
-  if (!advanceInput) return;
+  // ── Job Offers follow-up ──────────────────────────────────────────────────
+  let jobOffersConfig = { star_rating_for_offers: 2.5, star_rating_max_for_offers: null, job_offers_count: 3, job_offers_expiry_hours: 48 };
 
-  const advanceIntervals = advanceInput.toLowerCase() === 'default' ? '[24, 48]' : advanceInput;
+  if (features.feature_job_offers) {
+    await dm.send('**— Job Offers Setup —**\nYou enabled job offers. Answer the next 4 questions to configure it.');
+
+    const starMin = await askWithDefault('**[Job Offers 1/4]** Minimum star rating for job offers? (1.0 – 5.0)\nDefault: 2.5', '2.5');
+    if (!starMin) return;
+
+    const starMax = await askWithDefault('**[Job Offers 2/4]** Maximum star rating? Type none for no cap.\nDefault: none', 'none');
+    if (!starMax) return;
+
+    const offersCount = await askWithDefault('**[Job Offers 3/4]** How many offers should each user receive?\nDefault: 3', '3');
+    if (!offersCount) return;
+
+    const offersExpiry = await askWithDefault('**[Job Offers 4/4]** How many hours should offers last before expiring?\nDefault: 48', '48');
+    if (!offersExpiry) return;
+
+    jobOffersConfig = {
+      star_rating_for_offers:     parseFloat(starMin) || 2.5,
+      star_rating_max_for_offers: starMax.toLowerCase() === 'none' ? null : (parseFloat(starMax) || null),
+      job_offers_count:           parseInt(offersCount) || 3,
+      job_offers_expiry_hours:    parseInt(offersExpiry) || 48,
+    };
+  }
+
+  // ── Stream Reminders follow-up ────────────────────────────────────────────
+  let streamConfig = { stream_reminder_minutes: 45 };
+
+  if (features.feature_stream_reminders) {
+    const reminderMins = await askWithDefault(
+      '**— Stream Reminders Setup —**\nHow many minutes after a stream link is posted should the bot send a reminder?\nDefault: 45', '45'
+    );
+    if (!reminderMins) return;
+    streamConfig = { stream_reminder_minutes: parseInt(reminderMins) || 45 };
+  }
+
+  // ── Advance System follow-up ──────────────────────────────────────────────
+  let advanceConfig = { advance_intervals: '[24, 48]' };
+
+  if (features.feature_advance_system) {
+    const advanceInput = await askWithDefault(
+      '**— Advance System Setup —**\nWhat advance intervals (hours) should be available? Enter as a JSON array.\nExample: [24, 48] or [12, 24, 48]\nDefault: [24, 48]', '[24, 48]'
+    );
+    if (!advanceInput) return;
+    advanceConfig = { advance_intervals: advanceInput };
+  }
 
   // ── Save ──────────────────────────────────────────────────────────────────
   try {
     await createDefaultConfig(guildId, leagueName);
     await saveConfig(guildId, {
-      league_name: leagueName,
+      league_name:         leagueName,
       league_abbreviation: leagueAbbr,
+      ...channelConfig,
       ...features,
-      advance_intervals: advanceIntervals,
+      ...jobOffersConfig,
+      ...streamConfig,
+      ...advanceConfig,
     });
+
+    const summaryFields = [
+      { name: 'League Name',      value: leagueName,              inline: true },
+      { name: 'Abbreviation',     value: leagueAbbr,              inline: true },
+      { name: '​',           value: '​',                inline: true },
+      { name: 'News Feed',        value: `#${newsFeedCh.name}`,   inline: true },
+      { name: 'Signed Coaches',   value: `#${signedCh.name}`,     inline: true },
+      { name: 'Team Lists',       value: `#${teamListCh.name}`,   inline: true },
+      { name: 'Advance Tracker',  value: `#${advanceCh.name}`,    inline: true },
+      { name: 'Streaming',        value: `#${streamCh.name}`,     inline: true },
+      { name: 'Head Coach Role',  value: channelConfig.role_head_coach, inline: true },
+      { name: '​',           value: '​',                inline: true },
+      { name: 'Job Offers',       value: features.feature_job_offers       ? '✅' : '❌', inline: true },
+      { name: 'Stream Reminders', value: features.feature_stream_reminders ? '✅' : '❌', inline: true },
+      { name: 'Advance System',   value: features.feature_advance_system   ? '✅' : '❌', inline: true },
+      { name: 'Press Releases',   value: features.feature_press_releases   ? '✅' : '❌', inline: true },
+      { name: 'Rankings',         value: features.feature_rankings         ? '✅' : '❌', inline: true },
+      { name: '​',           value: '​',                inline: true },
+    ];
+
+    if (features.feature_job_offers) {
+      const maxStr = jobOffersConfig.star_rating_max_for_offers ? jobOffersConfig.star_rating_max_for_offers + ' stars' : 'No cap';
+      summaryFields.push(
+        { name: 'Min Star Rating', value: jobOffersConfig.star_rating_for_offers + ' stars', inline: true },
+        { name: 'Max Star Rating', value: maxStr,                                             inline: true },
+        { name: 'Offers Per User', value: String(jobOffersConfig.job_offers_count),           inline: true },
+        { name: 'Offer Expiry',    value: jobOffersConfig.job_offers_expiry_hours + ' hrs',   inline: true },
+      );
+    }
+    if (features.feature_stream_reminders) {
+      summaryFields.push({ name: 'Stream Reminder', value: streamConfig.stream_reminder_minutes + ' min', inline: true });
+    }
+    if (features.feature_advance_system) {
+      summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals, inline: true });
+    }
 
     const embed = new EmbedBuilder()
       .setTitle('✅ Setup Complete!')
       .setColor(0x00ff00)
-      .setDescription('Your league is configured! You can edit any setting anytime with `/config edit` or view all settings with `/config view`.')
-      .addFields(
-        { name: 'League Name',       value: leagueName,   inline: true },
-        { name: 'Abbreviation',       value: leagueAbbr,   inline: true },
-        { name: 'Job Offers',       value: features.feature_job_offers       ? '✅' : '❌', inline: true },
-        { name: 'Stream Reminders', value: features.feature_stream_reminders  ? '✅' : '❌', inline: true },
-        { name: 'Advance System',   value: features.feature_advance_system    ? '✅' : '❌', inline: true },
-        { name: 'Press Releases',   value: features.feature_press_releases    ? '✅' : '❌', inline: true },
-        { name: 'Rankings',         value: features.feature_rankings          ? '✅' : '❌', inline: true },
-        { name: 'Advance Intervals',value: advanceIntervals,                               inline: true },
-      );
+      .setDescription('Your league is configured! Use `/config view` to review or `/config edit` to change anything.')
+      .addFields(summaryFields);
 
     await dm.send({ embeds: [embed] });
   } catch (err) {
@@ -570,7 +723,8 @@ async function handleConfigView(interaction) {
         `Streaming: \`${config.channel_streaming}\``,
         inline: true },
       { name: '🎮 Settings', value:
-        `Star Rating: \`${config.star_rating_for_offers}\`\n` +
+        `Min Star Rating: \`${config.star_rating_for_offers}\`\n` +
+        `Max Star Rating: \`${config.star_rating_max_for_offers || 'No cap'}\`\n` +
         `Job Offers Count: \`${config.job_offers_count}\`\n` +
         `Offers Expire: \`${config.job_offers_expiry_hours}hrs\`\n` +
         `Stream Reminder: \`${config.stream_reminder_minutes} min\`\n` +
@@ -613,7 +767,7 @@ async function handleConfigEdit(interaction) {
   const allowed = [
     'league_name', 'league_abbreviation', 'channel_news_feed', 'channel_advance_tracker', 'channel_team_lists',
     'channel_signed_coaches', 'channel_streaming', 'role_head_coach',
-    'star_rating_for_offers', 'job_offers_count', 'job_offers_expiry_hours', 'stream_reminder_minutes', 'advance_intervals',
+    'star_rating_for_offers', 'star_rating_max_for_offers', 'job_offers_count', 'job_offers_expiry_hours', 'stream_reminder_minutes', 'advance_intervals',
     'embed_color_primary', 'embed_color_win', 'embed_color_loss',
   ];
   if (!allowed.includes(setting)) {
@@ -644,14 +798,18 @@ async function handleJobOffers(interaction) {
     return interaction.reply({ content: '❌ Job offers are disabled in this server.', ephemeral: true });
   }
 
+  // Block users who already have a team — job offers are for new coaches only
   const currentTeam = await getTeamByUser(userId, guildId);
-  if (!currentTeam) {
-    return interaction.reply({ content: '❌ You don\'t have a team assigned. Ask an admin to use `/assign-team`.', ephemeral: true });
+  if (currentTeam) {
+    return interaction.reply({
+      content: `❌ You already coach **${currentTeam.team_name}**. Job offers are only for coaches without a team.`,
+      ephemeral: true,
+    });
   }
 
   const now = new Date();
 
-  // Check for existing active offers
+  // Check for existing active offers and resend them with buttons
   const { data: existingOffers } = await supabase
     .from('job_offers')
     .select('*, teams(team_name, star_rating, conference)')
@@ -660,65 +818,48 @@ async function handleJobOffers(interaction) {
     .gt('expires_at', now.toISOString());
 
   if (existingOffers && existingOffers.length > 0) {
-    const expiresAt = new Date(existingOffers[0].expires_at);
-    const hoursLeft = Math.ceil((expiresAt - now) / (1000 * 60 * 60));
-    const embed = new EmbedBuilder()
-      .setTitle(`📋 Your Current Job Offers`)
-      .setColor(config.embed_color_primary_int)
-      .setDescription(`You already have active offers. They expire in **${hoursLeft} hour(s)**. You cannot request new offers until then.`)
-      .addFields(
-        existingOffers.map((o, i) => ({
-          name: `${i + 1}. ${o.teams.team_name}`,
-          value: `Rating: ${starRating(o.teams.star_rating || 0)} (${o.teams.star_rating || '?'}⭐)\nConference: ${o.teams.conference || 'Unknown'}`,
-          inline: false,
-        }))
-      )
-      .setFooter({ text: 'Contact an admin to accept a job offer.' });
-    try {
-      const dmChannel = await interaction.user.createDM();
-      await dmChannel.send({ embeds: [embed] });
-      await interaction.reply({ content: '📬 Your current job offers have been sent to your DMs!', ephemeral: true });
-    } catch {
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-    }
+    await sendOffersAsDM(interaction, existingOffers, config, guildId, true);
     return;
   }
 
-  // Find teams that are available AND not currently locked in anyone else's offers
+  // Find teams available — not assigned in this guild, not locked in active offers
   const { data: lockedTeamIds } = await supabase
     .from('job_offers')
     .select('team_id')
     .eq('guild_id', guildId)
     .gt('expires_at', now.toISOString());
-
   const locked = (lockedTeamIds || []).map(r => r.team_id);
 
-  // Get all assigned team_ids for this guild
   const { data: assignedInGuild } = await supabase
     .from('team_assignments')
     .select('team_id')
     .eq('guild_id', guildId);
   const assignedIds = (assignedInGuild || []).map(a => a.team_id);
 
-  // Fetch global teams meeting star rating, not assigned in this guild, not locked in offers
-  const { data: availableJobs } = await supabase
+  let jobQuery = supabase
     .from('teams')
     .select('*')
     .gte('star_rating', config.star_rating_for_offers)
     .order('star_rating', { ascending: false })
     .limit(50);
+  if (config.star_rating_max_for_offers) {
+    jobQuery = jobQuery.lte('star_rating', config.star_rating_max_for_offers);
+  }
+  const { data: availableJobs } = await jobQuery;
 
   const pool = (availableJobs || []).filter(t =>
     !assignedIds.includes(t.id) && !locked.includes(t.id)
   );
 
   if (pool.length === 0) {
-    return interaction.reply({ content: `ℹ️ No unlocked jobs meet the ${config.star_rating_for_offers}⭐ minimum right now. Try again later.`, ephemeral: true });
+    return interaction.reply({
+      content: `ℹ️ No available jobs meet the ${config.star_rating_for_offers}⭐ minimum right now. Try again later.`,
+      ephemeral: true,
+    });
   }
 
   // Shuffle and pick N offers
-  const shuffled = pool.sort(() => Math.random() - 0.5);
-  const picks    = shuffled.slice(0, config.job_offers_count);
+  const picks = pool.sort(() => Math.random() - 0.5).slice(0, config.job_offers_count);
 
   // Lock them in the job_offers table
   const expiryHours = config.job_offers_expiry_hours || 48;
@@ -733,26 +874,157 @@ async function handleJobOffers(interaction) {
     }))
   );
 
+  // Format as {teams: {...}} to match existing offer shape
+  const shaped = picks.map(t => ({ teams: t, expires_at: expiresAt.toISOString(), team_id: t.id }));
+  await sendOffersAsDM(interaction, shaped, config, guildId, false);
+}
+
+// Sends offers to DM with an Accept button per offer
+async function sendOffersAsDM(interaction, offers, config, guildId, isExisting) {
+  const expiresAt  = new Date(offers[0].expires_at);
+  const now        = new Date();
+  const hoursLeft  = Math.ceil((expiresAt - now) / (1000 * 60 * 60));
+
   const embed = new EmbedBuilder()
-    .setTitle(`📋 Job Offers for ${interaction.user.displayName}`)
+    .setTitle('📋 Your Job Offers')
     .setColor(config.embed_color_primary_int)
-    .setDescription(`Here are your **${picks.length}** offer(s). They expire in **${expiryHours} hours**.`)
+    .setDescription(
+      isExisting
+        ? `You already have active offers. They expire in **${hoursLeft} hour(s)**. Click a button below to accept one.`
+        : `Here are your **${offers.length}** offer(s). They expire in **${hoursLeft} hours**. Click a button below to accept one.`
+    )
     .addFields(
-      picks.map((t, i) => ({
-        name: `${i + 1}. ${t.team_name}`,
-        value: `Rating: ${starRating(t.star_rating || 0)} (${t.star_rating || '?'}⭐)\nConference: ${t.conference || 'Unknown'}`,
+      offers.map((o, i) => ({
+        name: `${i + 1}. ${o.teams.team_name}`,
+        value: `Rating: ${starRating(o.teams.star_rating || 0)} (${o.teams.star_rating || '?'}⭐)\nConference: ${o.teams.conference || 'Unknown'}`,
         inline: false,
       }))
     )
-    .setFooter({ text: 'Contact an admin to accept a job offer. Offers cannot be refreshed until they expire.' });
+    .setFooter({ text: 'Offers cannot be refreshed until they expire.' });
+
+  // One Accept button per offer
+  const rows = [];
+  for (let i = 0; i < offers.length; i += 5) {
+    const row = new ActionRowBuilder().addComponents(
+      offers.slice(i, i + 5).map((o, j) =>
+        new ButtonBuilder()
+          .setCustomId(`accept-offer_${guildId}_${offers[i + j].team_id}`)
+          .setLabel(`Accept: ${o.teams.team_name}`)
+          .setStyle(ButtonStyle.Primary)
+      )
+    );
+    rows.push(row);
+  }
 
   try {
-    const dmChannel = await interaction.user.createDM();
-    await dmChannel.send({ embeds: [embed] });
+    const dm = await interaction.user.createDM();
+    await dm.send({ embeds: [embed], components: rows });
     await interaction.reply({ content: '📬 Your job offers have been sent to your DMs!', ephemeral: true });
   } catch {
-    // DMs disabled — fall back to ephemeral in channel
-    await interaction.reply({ embeds: [embed], ephemeral: true });
+    await interaction.reply({ embeds: [embed], components: rows, ephemeral: true });
+  }
+}
+
+// Handle Accept button clicks
+async function handleAcceptOffer(interaction) {
+  // customId format: accept-offer_guildId_teamId
+  const parts   = interaction.customId.split('_');
+  const guildId = parts[1];
+  const teamId  = parseInt(parts[2]);
+  const userId  = interaction.user.id;
+
+  await interaction.deferUpdate();
+
+  // Verify the offer still exists and belongs to this user
+  const { data: offer } = await supabase
+    .from('job_offers')
+    .select('*, teams(*)')
+    .eq('guild_id', guildId)
+    .eq('user_id', userId)
+    .eq('team_id', teamId)
+    .gt('expires_at', new Date().toISOString())
+    .single();
+
+  if (!offer) {
+    await interaction.editReply({
+      content: '❌ This offer is no longer available — it may have expired or already been taken.',
+      components: [],
+      embeds: [],
+    });
+    return;
+  }
+
+  // Double-check team isn't already assigned in this guild
+  const { data: existing } = await supabase
+    .from('team_assignments')
+    .select('user_id')
+    .eq('guild_id', guildId)
+    .eq('team_id', teamId)
+    .single();
+
+  if (existing) {
+    await interaction.editReply({
+      content: `❌ **${offer.teams.team_name}** was just taken by someone else. Run \`/joboffers\` again for a new set.`,
+      components: [],
+      embeds: [],
+    });
+    return;
+  }
+
+  // Assign the team
+  await assignTeam(teamId, userId, guildId);
+
+  // Delete ALL of this user's offers for this guild — they have a team now
+  await supabase
+    .from('job_offers')
+    .delete()
+    .eq('guild_id', guildId)
+    .eq('user_id', userId);
+
+  // Assign head coach role in the guild
+  const config = await getConfig(guildId);
+  const guild  = client.guilds.cache.get(guildId);
+  if (guild) {
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (member) {
+      const hcRole = await findOrCreateRole(guild, config.role_head_coach);
+      await member.roles.add(hcRole).catch(() => {});
+      if (!config.role_head_coach_id) {
+        await saveConfig(guildId, { role_head_coach_id: hcRole.id });
+      }
+    }
+  }
+
+  // Update the DM to show acceptance
+  const successEmbed = new EmbedBuilder()
+    .setTitle('✅ Offer Accepted!')
+    .setColor(0x00ff00)
+    .setDescription(`You are now the Head Coach of **${offer.teams.team_name}**! Welcome to the league.`)
+    .addFields(
+      { name: 'Team',       value: offer.teams.team_name,              inline: true },
+      { name: 'Conference', value: offer.teams.conference || 'Unknown', inline: true },
+      { name: 'Rating',     value: `${starRating(offer.teams.star_rating || 0)} (${offer.teams.star_rating || '?'}⭐)`, inline: true },
+    );
+
+  await interaction.editReply({ embeds: [successEmbed], components: [] });
+
+  // Post signing announcement to the guild
+  if (guild) {
+    const signingEmbed = new EmbedBuilder()
+      .setTitle(`✍️ Coach Signed — ${offer.teams.team_name}`)
+      .setColor(config.embed_color_primary_int)
+      .setDescription(`<@${userId}> has accepted the head coaching position at **${offer.teams.team_name}**!`)
+      .addFields(
+        { name: 'Coach',      value: `<@${userId}>`,                     inline: true },
+        { name: 'Team',       value: offer.teams.team_name,              inline: true },
+        { name: 'Conference', value: offer.teams.conference || 'Unknown', inline: true },
+      )
+      .setTimestamp();
+
+    const signedChannel = findTextChannel(guild, config.channel_signed_coaches);
+    const newsChannel   = findTextChannel(guild, config.channel_news_feed);
+    const target        = signedChannel || newsChannel;
+    if (target) await target.send({ embeds: [signingEmbed] });
   }
 }
 
@@ -1302,8 +1574,76 @@ async function handleMoveCoach(interaction) {
 // =====================================================
 // INTERACTION ROUTER
 // =====================================================
+// =====================================================
+// AUTOCOMPLETE HANDLER
+// =====================================================
+
+async function handleAutocomplete(interaction) {
+  const { commandName, guildId } = interaction;
+  const focused = interaction.options.getFocused(true);
+  const query   = focused.value.toLowerCase();
+
+  let choices = [];
+
+  if (commandName === 'assign-team' || commandName === 'any-game-result' || commandName === 'move-coach') {
+    // Show all global teams (unfiltered — admin commands)
+    const { data: teams } = await supabase
+      .from('teams')
+      .select('id, team_name, conference, star_rating')
+      .ilike('team_name', `%${query}%`)
+      .order('team_name')
+      .limit(25);
+
+    choices = (teams || []).map(t => ({
+      name: `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
+      value: t.team_name,
+    }));
+  }
+
+  else if (commandName === 'game-result') {
+    // Opponent field — show all teams except the user's own
+    const userTeam = await getTeamByUser(interaction.user.id, guildId);
+    const { data: teams } = await supabase
+      .from('teams')
+      .select('id, team_name, conference')
+      .ilike('team_name', `%${query}%`)
+      .order('team_name')
+      .limit(25);
+
+    choices = (teams || [])
+      .filter(t => !userTeam || t.team_name !== userTeam.team_name)
+      .map(t => ({
+        name: `${t.team_name}${t.conference ? ' · ' + t.conference : ''}`,
+        value: t.team_name,
+      }));
+  }
+
+  else if (commandName === 'resetteam') {
+    // Only show teams that are currently assigned in this guild
+    const { data: assignments } = await supabase
+      .from('team_assignments')
+      .select('team_id, user_id, teams(team_name, conference)')
+      .eq('guild_id', guildId);
+
+    choices = (assignments || [])
+      .filter(a => a.teams && a.teams.team_name.toLowerCase().includes(query))
+      .slice(0, 25)
+      .map(a => ({
+        name: a.teams.team_name + (a.teams.conference ? ' · ' + a.teams.conference : ''),
+        value: a.teams.team_name,
+      }));
+  }
+
+  await interaction.respond(choices);
+}
+
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    // Handle autocomplete before anything else
+    if (interaction.isAutocomplete()) {
+      return handleAutocomplete(interaction);
+    }
+
     if (interaction.isChatInputCommand()) {
       switch (interaction.commandName) {
         case 'setup':         return handleSetup(interaction);
@@ -1329,6 +1669,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'move-coach':         return handleMoveCoach(interaction);
         default:
           await interaction.reply({ content: '❓ Unknown command.', ephemeral: true });
+      }
+    }
+
+    // Handle Accept Offer buttons
+    if (interaction.isButton()) {
+      if (interaction.customId.startsWith('accept-offer_')) {
+        return handleAcceptOffer(interaction);
       }
     }
 
