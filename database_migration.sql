@@ -187,63 +187,15 @@ CREATE POLICY "job_offers_all" ON job_offers FOR ALL USING (true) WITH CHECK (tr
 
 
 -- =====================================================
--- 8. YOUR SERVER CONFIG INSERT
+-- 8. SERVER CONFIG
 -- =====================================================
--- !! Replace both instances of YOUR_DISCORD_SERVER_ID below before running !!
--- To find it: Discord → User Settings → Advanced → enable Developer Mode
---             then right-click your server name → Copy Server ID
-
-INSERT INTO config (
-  guild_id,
-  league_name,
-  feature_job_offers,
-  feature_stream_reminders,
-  feature_advance_system,
-  feature_press_releases,
-  feature_rankings,
-  channel_news_feed,
-  channel_advance_tracker,
-  channel_team_lists,
-  channel_signed_coaches,
-  channel_streaming,
-  role_head_coach,
-  star_rating_for_offers,
-  job_offers_count,
-  job_offers_expiry_hours,
-  stream_reminder_minutes,
-  advance_intervals,
-  embed_color_primary,
-  embed_color_win,
-  embed_color_loss
-) VALUES (
-  'YOUR_DISCORD_SERVER_ID',   -- <- REPLACE
-  'Dynasty League',           -- Your league name
-  true,
-  true,
-  true,
-  true,
-  true,
-  'news-feed',
-  'advance-tracker',
-  'team-lists',
-  'signed-coaches',
-  'streaming',
-  'head coach',
-  2.5,
-  3,
-  48,
-  45,
-  '[24, 48]',
-  '0x1e90ff',
-  '0x00ff00',
-  '0xff0000'
-) ON CONFLICT (guild_id) DO UPDATE SET
-  league_name = EXCLUDED.league_name,
-  updated_at  = NOW();
-
-INSERT INTO meta (guild_id, season, week)
-VALUES ('YOUR_DISCORD_SERVER_ID', 1, 1)  -- <- REPLACE
-ON CONFLICT (guild_id) DO NOTHING;
+-- No manual insert needed!
+-- When the bot is invited to a server it automatically
+-- creates a default config and meta row for that guild.
+-- Just run /setup in your Discord server after inviting the bot.
+--
+-- To add additional servers later, simply invite the bot
+-- to the new server and it will handle the rest.
 
 
 -- =====================================================

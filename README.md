@@ -53,10 +53,8 @@ dynasty-bot-universal/
 1. Create a new project at [supabase.com](https://supabase.com)
 2. Go to **SQL Editor → New Query**
 3. Open `database_migration.sql` and paste the entire contents
-4. Replace both instances of `YOUR_DISCORD_SERVER_ID` with your actual Discord server ID
-   - To find it: Discord → User Settings → Advanced → enable **Developer Mode** → right-click your server → **Copy Server ID**
-5. Click **Run**
-6. The verification query at the bottom will show all 7 tables — confirm they exist
+4. Click **Run** — no values need replacing, the bot handles server setup automatically
+5. The verification query at the bottom will show all 7 tables — confirm they exist
 7. Go to **Settings → API** and copy your **Project URL** and **anon public key**
 
 ### Step 4 — Configure Environment
@@ -185,17 +183,12 @@ Every table is scoped by `guild_id` so multiple servers share the same database 
 
 ## 🔧 Adding a Second Server
 
-1. Get the new server's Discord guild ID
-2. Invite the bot to the server using the same invite URL from setup
-3. Insert a new config row in Supabase:
-```sql
-INSERT INTO config (guild_id, league_name)
-VALUES ('NEW_GUILD_ID', 'New League Name');
+1. Invite the bot to the new server using the same invite URL from setup
+2. The bot automatically creates a default config and meta row the moment it joins
+3. The server owner gets a welcome DM with next steps
+4. Run `/setup` in the new server to customize the league settings
 
-INSERT INTO meta (guild_id, season, week)
-VALUES ('NEW_GUILD_ID', 1, 1);
-```
-4. Run `/setup` in the new server
+No manual SQL required.
 
 ---
 

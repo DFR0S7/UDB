@@ -1307,11 +1307,86 @@ if (SELF_PING_URL) {
 }
 
 // =====================================================
+// GUILD AUTO-SETUP
+// =====================================================
+
+/**
+ * Called whenever the bot joins a new server.
+ * Creates a default config + meta row so admins can
+ * immediately run /setup without any manual SQL.
+ */
+async function initGuild(guild) {
+  try {
+    // Check if config already exists for this guild
+    const { data } = await supabase
+      .from('config')
+      .select('guild_id')
+      .eq('guild_id', guild.id)
+      .single();
+
+    if (data) {
+      console.log(`[guild] Config already exists for ${guild.name} (${guild.id})`);
+      return;
+    }
+
+    // Create default config row
+    await createDefaultConfig(guild.id, guild.name);
+
+    // Create default meta row
+    await supabase
+      .from('meta')
+      .upsert({ guild_id: guild.id, season: 1, week: 1 }, { onConflict: 'guild_id' });
+
+    console.log(`[guild] Auto-created config for new guild: ${guild.name} (${guild.id})`);
+
+    // Try to notify the server owner
+    const owner = await guild.fetchOwner().catch(() => null);
+    if (owner) {
+      const embed = new EmbedBuilder()
+        .setTitle('👋 Dynasty Bot is Ready!')
+        .setColor(0x1e90ff)
+        .setDescription(
+          `Thanks for adding Dynasty Bot to **${guild.name}**!\n\n` +
+          `A default configuration has been created for your server. ` +
+          `Run \`/setup\` in your server to customize your league settings, ` +
+          `or use \`/config view\` to see the defaults.`
+        )
+        .addFields(
+          { name: '📋 Next Steps', value:
+            '1. Run `/setup` to configure your league\n' +
+            '2. Add your teams to the `teams` table in Supabase\n' +
+            '3. Use `/listteams` to post available teams\n' +
+            '4. Use `/assign-team` to assign coaches',
+          }
+        );
+      await owner.send({ embeds: [embed] }).catch(() => {
+        console.log(`[guild] Could not DM owner of ${guild.name}, skipping welcome message.`);
+      });
+    }
+  } catch (err) {
+    console.error(`[guild] Failed to auto-init guild ${guild.name} (${guild.id}):`, err.message);
+  }
+}
+
+// Fires when the bot is invited to a new server
+client.on(Events.GuildCreate, async (guild) => {
+  console.log(`[guild] Joined new guild: ${guild.name} (${guild.id})`);
+  await initGuild(guild);
+});
+
+// =====================================================
 // BOT READY
 // =====================================================
 client.once(Events.ClientReady, async (c) => {
   console.log(`[bot] Logged in as ${c.user.tag}`);
   await registerCommands();
+
+  // Sync any guilds that were added while the bot was offline
+  console.log(`[bot] Syncing ${c.guilds.cache.size} guild(s)...`);
+  for (const guild of c.guilds.cache.values()) {
+    await initGuild(guild);
+  }
+
   console.log(`[bot] Ready! Serving ${c.guilds.cache.size} guild(s).`);
 
   // Check for expired job offers every 30 minutes
