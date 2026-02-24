@@ -71,30 +71,41 @@ PORT=3000
 SELF_PING_URL=        # Leave blank for now, fill in after Render deploy
 ```
 
-### Step 5 — Install & Run Locally
-```bash
-npm install
-node index.js
-```
-You should see:
-```
-[bot] Logged in as YourBot#1234
-[commands] Registered 16 commands.
-[bot] Ready! Serving 1 guild(s).
-```
+### Step 5 — Push to GitHub
+1. Add all your bot files to the repo:
+   - `index.js`
+   - `package.json`
+   - `database_migration.sql`
+   - `.env.example`
+   - `README.md`
+2. Commit and push:
+   ```bash
+   git add .
+   git commit -m "Initial commit"
+   git push origin main
+   ```
+   > ⚠️ Never add your `.env` file — it contains your real tokens. The Node `.gitignore` GitHub generated blocks this automatically.
 
 ### Step 6 — Deploy to Render
-1. Push your project to a GitHub repository (make sure `.env` is in `.gitignore`)
-2. Go to [dashboard.render.com](https://dashboard.render.com) → **New → Web Service**
-3. Connect your GitHub repository
-4. Configure:
+1. Go to [dashboard.render.com](https://dashboard.render.com) → **New → Web Service**
+2. Connect your GitHub repository
+3. Configure:
+   - **Name:** `dynasty-bot` (or whatever you like)
    - **Environment:** Node
    - **Build Command:** `npm install`
    - **Start Command:** `node index.js`
    - **Plan:** Free
-5. Add all your `.env` values under **Environment Variables**
-6. Click **Create Web Service** and wait for deploy
-7. Copy your Render app URL (e.g. `https://dynasty-bot.onrender.com`) and add it as `SELF_PING_URL` in Render's environment variables — this keeps the free instance from spinning down
+4. Add your environment variables under **Environment Variables**:
+   - `DISCORD_TOKEN`
+   - `CLIENT_ID`
+   - `SUPABASE_URL`
+   - `SUPABASE_KEY`
+   - `PORT` → `3000`
+5. Click **Create Web Service** and wait for the deploy (2-3 minutes)
+6. Once live, copy your Render app URL (e.g. `https://dynasty-bot.onrender.com`) and add it as a new environment variable:
+   - `SELF_PING_URL` → `https://dynasty-bot.onrender.com`
+   - This keeps the free instance from spinning down
+7. Render will auto-redeploy whenever you push changes to GitHub
 
 ### Step 7 — First-Time Discord Setup
 Run `/setup` in your Discord server and follow the prompts to configure your league name, features, and settings.
