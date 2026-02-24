@@ -436,30 +436,33 @@ async function handleSetup(interaction) {
   const guildId = interaction.guildId;
   const userId  = interaction.user.id;
 
-  // Send setup via DM so it's private and controlled
+  // Open a DM with the admin and run the entire conversation there
   let dm;
   try {
     dm = await interaction.user.createDM();
-    await interaction.reply({ content: '📬 Setup wizard sent to your DMs!', ephemeral: true });
   } catch {
-    // DMs disabled — fall back to the channel ephemerally
-    dm = interaction.channel;
-    await interaction.reply({ content: '⚙️ Starting setup wizard here since your DMs are disabled.', ephemeral: true });
+    return interaction.reply({
+      content: "❌ I couldn't open a DM with you. Please enable DMs from server members and try again.",
+      ephemeral: true,
+    });
   }
 
-  // Ask one question at a time and wait for a reply before continuing
+  await interaction.reply({ content: '📬 Check your DMs — setup wizard is waiting!', ephemeral: true });
+  await dm.send("👋 **Dynasty Bot Setup Wizard**\nI'll ask you 4 quick questions. You have 2 minutes to answer each one.");
+
+  // Ask a question in DM and wait for the reply in the same DM
   const ask = async (question) => {
     await dm.send(question);
     try {
       const collected = await dm.awaitMessages({
-        filter: m => m.author.id === userId,
+        filter: m => m.author.id === userId && !m.author.bot,
         max: 1,
-        time: 120000,   // 2 minutes to answer each question
+        time: 120000,   // 2 minutes per question
         errors: ['time'],
       });
       return collected.first().content.trim();
     } catch {
-      await dm.send('⏰ Setup timed out. Run `/setup` again to restart.');
+      await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
       return null;
     }
   };
@@ -670,7 +673,14 @@ async function handleJobOffers(interaction) {
         }))
       )
       .setFooter({ text: 'Contact an admin to accept a job offer.' });
-    return interaction.reply({ embeds: [embed], ephemeral: true });
+    try {
+      const dmChannel = await interaction.user.createDM();
+      await dmChannel.send({ embeds: [embed] });
+      await interaction.reply({ content: '📬 Your current job offers have been sent to your DMs!', ephemeral: true });
+    } catch {
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+    return;
   }
 
   // Find teams that are available AND not currently locked in anyone else's offers
@@ -735,7 +745,14 @@ async function handleJobOffers(interaction) {
     )
     .setFooter({ text: 'Contact an admin to accept a job offer. Offers cannot be refreshed until they expire.' });
 
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+  try {
+    const dmChannel = await interaction.user.createDM();
+    await dmChannel.send({ embeds: [embed] });
+    await interaction.reply({ content: '📬 Your job offers have been sent to your DMs!', ephemeral: true });
+  } catch {
+    // DMs disabled — fall back to ephemeral in channel
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+  }
 }
 
 // Expire job offers — runs on an interval, notifies users and releases teams back to pool
