@@ -67,28 +67,46 @@ CREATE POLICY "config_all" ON config FOR ALL USING (true) WITH CHECK (true);
 
 
 -- =====================================================
--- 2. TEAMS
+-- 2. TEAMS (global — shared across all servers)
 -- =====================================================
+-- You manage this table directly in Supabase.
+-- Add every school once here and all servers share the same roster.
 CREATE TABLE IF NOT EXISTS teams (
   id          SERIAL PRIMARY KEY,
-  guild_id    TEXT    NOT NULL,
-  team_name   TEXT    NOT NULL,
+  team_name   TEXT    NOT NULL UNIQUE,
   conference  TEXT,
   star_rating DECIMAL,
-  user_id     TEXT,           -- Discord user ID of assigned coach (NULL = available)
-  created_at  TIMESTAMP DEFAULT NOW(),
-
-  UNIQUE (guild_id, team_name)
+  created_at  TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_teams_guild      ON teams(guild_id);
-CREATE INDEX IF NOT EXISTS idx_teams_guild_user ON teams(guild_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_teams_name ON teams(team_name);
 ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "teams_all" ON teams FOR ALL USING (true) WITH CHECK (true);
 
 
 -- =====================================================
--- 3. RESULTS
+-- 3. TEAM ASSIGNMENTS (per-server)
+-- =====================================================
+-- Tracks which coach has which team in each league.
+-- Same team can have a different coach in every server.
+CREATE TABLE IF NOT EXISTS team_assignments (
+  id         SERIAL PRIMARY KEY,
+  guild_id   TEXT    NOT NULL,
+  team_id    INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  user_id    TEXT    NOT NULL,           -- Discord user ID of assigned coach
+  created_at TIMESTAMP DEFAULT NOW(),
+
+  UNIQUE (guild_id, team_id)             -- One coach per team per server
+);
+
+CREATE INDEX IF NOT EXISTS idx_assignments_guild      ON team_assignments(guild_id);
+CREATE INDEX IF NOT EXISTS idx_assignments_guild_user ON team_assignments(guild_id, user_id);
+ALTER TABLE team_assignments ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "assignments_all" ON team_assignments FOR ALL USING (true) WITH CHECK (true);
+
+
+-- =====================================================
+-- 4. RESULTS
 -- =====================================================
 CREATE TABLE IF NOT EXISTS results (
   id           SERIAL PRIMARY KEY,
@@ -110,7 +128,7 @@ CREATE POLICY "results_all" ON results FOR ALL USING (true) WITH CHECK (true);
 
 
 -- =====================================================
--- 4. RECORDS
+-- 5. RECORDS
 -- =====================================================
 CREATE TABLE IF NOT EXISTS records (
   id         SERIAL PRIMARY KEY,
@@ -132,7 +150,7 @@ CREATE POLICY "records_all" ON records FOR ALL USING (true) WITH CHECK (true);
 
 
 -- =====================================================
--- 5. META
+-- 6. META
 -- =====================================================
 CREATE TABLE IF NOT EXISTS meta (
   id               SERIAL PRIMARY KEY,
@@ -150,7 +168,7 @@ CREATE POLICY "meta_all" ON meta FOR ALL USING (true) WITH CHECK (true);
 
 
 -- =====================================================
--- 6. NEWS FEED
+-- 7. NEWS FEED
 -- =====================================================
 CREATE TABLE IF NOT EXISTS news_feed (
   id         SERIAL PRIMARY KEY,
@@ -167,7 +185,7 @@ CREATE POLICY "news_feed_all" ON news_feed FOR ALL USING (true) WITH CHECK (true
 
 
 -- =====================================================
--- 7. JOB OFFERS
+-- 8. JOB OFFERS
 -- =====================================================
 CREATE TABLE IF NOT EXISTS job_offers (
   id         SERIAL PRIMARY KEY,
@@ -187,7 +205,7 @@ CREATE POLICY "job_offers_all" ON job_offers FOR ALL USING (true) WITH CHECK (tr
 
 
 -- =====================================================
--- 8. SERVER CONFIG
+-- 9. SERVER CONFIG
 -- =====================================================
 -- No manual insert needed!
 -- When the bot is invited to a server it automatically
@@ -199,11 +217,13 @@ CREATE POLICY "job_offers_all" ON job_offers FOR ALL USING (true) WITH CHECK (tr
 
 
 -- =====================================================
--- 9. VERIFICATION — should show all 7 tables with row counts
+-- 10. VERIFICATION — should show all 7 tables with row counts
 -- =====================================================
-SELECT 'config'     AS table_name, COUNT(*) AS rows FROM config
+SELECT 'config'          AS table_name, COUNT(*) AS rows FROM config
 UNION ALL
-SELECT 'teams',     COUNT(*) FROM teams
+SELECT 'teams',           COUNT(*) FROM teams
+UNION ALL
+SELECT 'team_assignments', COUNT(*) FROM team_assignments
 UNION ALL
 SELECT 'results',   COUNT(*) FROM results
 UNION ALL

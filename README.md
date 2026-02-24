@@ -160,7 +160,7 @@ All settings are stored per-server in the `config` table. Use `/config edit` to 
 | `/config features` | Toggle features on/off via dropdown menu. |
 | `/config edit` | Change a single config value by name. |
 | `/config reload` | Refresh config from database without redeploying. |
-| `/assign-team` | Assign a user to a team and give them the Head Coach role. |
+| `/assign-team` | Assign a user to a team in this league and give them the Head Coach role. |
 | `/resetteam` | Remove a user from their team and strip the role. |
 | `/listteams` | Post a taken/available team list to the team-lists channel. |
 | `/advance` | Announce the next week deadline with ET/CT/MT/PT times. |
@@ -178,17 +178,18 @@ All settings are stored per-server in the `config` table. Use `/config edit` to 
 
 ## 🗄️ Database Tables
 
-| Table | Purpose |
-|---|---|
-| `config` | One row per server — all bot settings |
-| `teams` | All teams per server, with coach assignment |
-| `results` | Every game result submitted |
-| `records` | Win/loss record per team per season |
-| `meta` | Current season and week per server |
-| `news_feed` | Press release history |
-| `job_offers` | Active locked job offers with expiry |
+| Table | Scope | Purpose |
+|---|---|---|
+| `config` | Per-server | One row per server — all bot settings |
+| `teams` | **Global** | All schools — managed by you, shared across every league |
+| `team_assignments` | Per-server | Tracks which coach has which team in each league |
+| `results` | Per-server | Every game result submitted |
+| `records` | Per-server | Win/loss record per team per season |
+| `meta` | Per-server | Current season and week |
+| `news_feed` | Per-server | Press release history |
+| `job_offers` | Per-server | Active locked job offers with expiry |
 
-Every table is scoped by `guild_id` so multiple servers share the same database with zero interference.
+The `teams` table is global — you add schools once and every league shares the same roster. Coach assignments are tracked separately in `team_assignments`, so the same school can have a different coach in each league.
 
 ---
 

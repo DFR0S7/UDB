@@ -189,43 +189,79 @@ function starRating(rating) {
 // =====================================================
 // SUPABASE HELPERS
 // =====================================================
+// Get the team a user is assigned to in a specific guild
 async function getTeamByUser(userId, guildId) {
   const { data } = await supabase
-    .from('teams')
-    .select('*')
+    .from('team_assignments')
+    .select('*, teams(*)')
     .eq('user_id', userId)
     .eq('guild_id', guildId)
     .single();
-  return data;
+  return data ? { ...data.teams, user_id: data.user_id, assignment_id: data.id } : null;
 }
 
+// Get a team by name (global) and attach assignment info for a specific guild
 async function getTeamByName(teamName, guildId) {
-  const { data } = await supabase
+  const { data: team } = await supabase
     .from('teams')
     .select('*')
-    .eq('guild_id', guildId)
     .ilike('team_name', teamName)
     .single();
-  return data;
+  if (!team) return null;
+
+  const { data: assignment } = await supabase
+    .from('team_assignments')
+    .select('*')
+    .eq('team_id', team.id)
+    .eq('guild_id', guildId)
+    .single();
+
+  return { ...team, user_id: assignment?.user_id || null, assignment_id: assignment?.id || null };
 }
 
+// Get all global teams with assignment info for a specific guild
 async function getAllTeams(guildId) {
-  const { data } = await supabase
+  const { data: teams } = await supabase
     .from('teams')
     .select('*')
-    .eq('guild_id', guildId)
     .order('team_name');
-  return data || [];
+  if (!teams) return [];
+
+  const { data: assignments } = await supabase
+    .from('team_assignments')
+    .select('*')
+    .eq('guild_id', guildId);
+
+  const assignMap = {};
+  for (const a of (assignments || [])) assignMap[a.team_id] = a;
+
+  return teams.map(t => ({
+    ...t,
+    user_id: assignMap[t.id]?.user_id || null,
+    assignment_id: assignMap[t.id]?.id || null,
+  }));
 }
 
+// Get all unassigned teams for a specific guild
 async function getAvailableTeams(guildId) {
-  const { data } = await supabase
-    .from('teams')
-    .select('*')
-    .eq('guild_id', guildId)
-    .is('user_id', null)
-    .order('team_name');
-  return data || [];
+  const all = await getAllTeams(guildId);
+  return all.filter(t => !t.user_id);
+}
+
+// Assign a team to a user in a guild
+async function assignTeam(teamId, userId, guildId) {
+  await supabase
+    .from('team_assignments')
+    .upsert({ team_id: teamId, user_id: userId, guild_id: guildId }, { onConflict: 'team_id,guild_id' });
+}
+
+// Remove a team assignment for a user in a guild
+async function unassignTeam(teamId, guildId) {
+  await supabase
+    .from('team_assignments')
+    .delete()
+    .eq('team_id', teamId)
+    .eq('guild_id', guildId);
 }
 
 async function getMeta(guildId) {
@@ -604,17 +640,24 @@ async function handleJobOffers(interaction) {
 
   const locked = (lockedTeamIds || []).map(r => r.team_id);
 
-  let query = supabase
+  // Get all assigned team_ids for this guild
+  const { data: assignedInGuild } = await supabase
+    .from('team_assignments')
+    .select('team_id')
+    .eq('guild_id', guildId);
+  const assignedIds = (assignedInGuild || []).map(a => a.team_id);
+
+  // Fetch global teams meeting star rating, not assigned in this guild, not locked in offers
+  const { data: availableJobs } = await supabase
     .from('teams')
     .select('*')
-    .eq('guild_id', guildId)
-    .is('user_id', null)
     .gte('star_rating', config.star_rating_for_offers)
     .order('star_rating', { ascending: false })
     .limit(50);
 
-  const { data: availableJobs } = await query;
-  const pool = (availableJobs || []).filter(t => !locked.includes(t.id));
+  const pool = (availableJobs || []).filter(t =>
+    !assignedIds.includes(t.id) && !locked.includes(t.id)
+  );
 
   if (pool.length === 0) {
     return interaction.reply({ content: `ℹ️ No unlocked jobs meet the ${config.star_rating_for_offers}⭐ minimum right now. Try again later.`, ephemeral: true });
@@ -972,21 +1015,21 @@ async function handleAssignTeam(interaction) {
     return interaction.editReply(`❌ Team \`${teamName}\` not found. Make sure it's in the database.`);
   }
 
-  // Check if already taken
+  // Check if already taken in this guild
   if (team.user_id && team.user_id !== user.id) {
     const currentCoach = await guild.members.fetch(team.user_id).catch(() => null);
     const coachName = currentCoach ? currentCoach.displayName : 'someone';
-    return interaction.editReply(`❌ **${team.team_name}** is already assigned to ${coachName}.`);
+    return interaction.editReply(`❌ **${team.team_name}** is already assigned to ${coachName} in this league.`);
   }
 
-  // Unassign old team if user has one
+  // Unassign old team if user has one in this guild
   const oldTeam = await getTeamByUser(user.id, guildId);
   if (oldTeam) {
-    await supabase.from('teams').update({ user_id: null }).eq('id', oldTeam.id);
+    await unassignTeam(oldTeam.id, guildId);
   }
 
-  // Assign team
-  await supabase.from('teams').update({ user_id: user.id }).eq('id', team.id);
+  // Assign team in this guild
+  await assignTeam(team.id, user.id, guildId);
 
   // Assign head coach role
   const member = await guild.members.fetch(user.id).catch(() => null);
@@ -1035,7 +1078,7 @@ async function handleResetTeam(interaction) {
     return interaction.reply({ content: `❌ <@${user.id}> doesn't have a team assigned.`, ephemeral: true });
   }
 
-  await supabase.from('teams').update({ user_id: null }).eq('id', team.id);
+  await unassignTeam(team.id, guildId);
 
   // Remove head coach role
   const member = await interaction.guild.members.fetch(user.id).catch(() => null);
@@ -1175,9 +1218,9 @@ async function handleMoveCoach(interaction) {
   }
 
   if (currentTeam) {
-    await supabase.from('teams').update({ user_id: null }).eq('id', currentTeam.id);
+    await unassignTeam(currentTeam.id, guildId);
   }
-  await supabase.from('teams').update({ user_id: user.id }).eq('id', newTeam.id);
+  await assignTeam(newTeam.id, user.id, guildId);
 
   const embed = new EmbedBuilder()
     .setTitle('🔄 Coach Moved')
@@ -1354,9 +1397,8 @@ async function initGuild(guild) {
         .addFields(
           { name: '📋 Next Steps', value:
             '1. Run `/setup` to configure your league\n' +
-            '2. Add your teams to the `teams` table in Supabase\n' +
-            '3. Use `/listteams` to post available teams\n' +
-            '4. Use `/assign-team` to assign coaches',
+            '2. Use `/listteams` to post available teams\n' +
+            '3. Use `/assign-team` to assign coaches',
           }
         );
       await owner.send({ embeds: [embed] }).catch(() => {
