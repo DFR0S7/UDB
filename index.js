@@ -439,18 +439,20 @@ async function handleSetup(interaction) {
   const guildId = interaction.guildId;
   const userId  = interaction.user.id;
 
-  // Open a DM with the admin
+  // Reply to the interaction immediately (Discord requires response within 3 seconds)
+  await interaction.reply({ content: '📬 Check your DMs — setup wizard is waiting!', flags: 64 });
+
+  // Now open the DM (can take a moment, interaction already acknowledged)
   let dm;
   try {
     dm = await interaction.user.createDM();
   } catch {
-    return interaction.reply({
+    return interaction.followUp({
       content: "❌ I couldn't open a DM with you. Please enable DMs from server members and try again.",
-      ephemeral: true,
+      flags: 64,
     });
   }
 
-  await interaction.reply({ content: '📬 Check your DMs — setup wizard is waiting!', ephemeral: true });
   await dm.send("👋 **Dynasty Bot Setup Wizard**\nAnswer each question in this DM. You have 2 minutes per step.");
 
   const guild = interaction.guild;
@@ -890,7 +892,7 @@ async function handleConfigView(interaction) {
         `Advance Intervals: \`${config.advance_intervals}\``,
         inline: true },
     );
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.reply({ embeds: [embed], flags: 64 });
 }
 
 // /config features
@@ -914,8 +916,7 @@ async function handleConfigFeatures(interaction) {
 
   await interaction.reply({
     content: '**Feature Toggles** — Select the features you want **ENABLED** (deselect to disable):',
-    components: [row],
-    ephemeral: true,
+    components: [row], flags: 64,
   });
 }
 
@@ -930,13 +931,13 @@ async function handleConfigEdit(interaction) {
     'embed_color_primary', 'embed_color_win', 'embed_color_loss',
   ];
   if (!allowed.includes(setting)) {
-    return interaction.reply({ content: `❌ Unknown setting \`${setting}\`. Allowed: ${allowed.join(', ')}`, ephemeral: true });
+    return interaction.reply({ content: `❌ Unknown setting \`${setting}\`. Allowed: ${allowed.join(', ')}`, flags: 64 });
   }
   try {
     await saveConfig(interaction.guildId, { [setting]: value });
-    await interaction.reply({ content: `✅ Updated **${setting}** to \`${value}\``, ephemeral: true });
+    await interaction.reply({ content: `✅ Updated **${setting}** to \`${value}\``, flags: 64 });
   } catch (err) {
-    await interaction.reply({ content: `❌ Failed to update: ${err.message}`, ephemeral: true });
+    await interaction.reply({ content: `❌ Failed to update: ${err.message}`, flags: 64 });
   }
 }
 
@@ -944,7 +945,7 @@ async function handleConfigEdit(interaction) {
 async function handleConfigReload(interaction) {
   guildConfigs.delete(interaction.guildId);
   const config = await loadGuildConfig(interaction.guildId);
-  await interaction.reply({ content: `✅ Config reloaded for **${config.league_name}**!`, ephemeral: true });
+  await interaction.reply({ content: `✅ Config reloaded for **${config.league_name}**!`, flags: 64 });
 }
 
 // /joboffers
@@ -954,15 +955,14 @@ async function handleJobOffers(interaction) {
   const config  = await getConfig(guildId);
 
   if (!config.feature_job_offers) {
-    return interaction.reply({ content: '❌ Job offers are disabled in this server.', ephemeral: true });
+    return interaction.reply({ content: '❌ Job offers are disabled in this server.', flags: 64 });
   }
 
   // Block users who already have a team — job offers are for new coaches only
   const currentTeam = await getTeamByUser(userId, guildId);
   if (currentTeam) {
     return interaction.reply({
-      content: `❌ You already coach **${currentTeam.team_name}**. Job offers are only for coaches without a team.`,
-      ephemeral: true,
+      content: `❌ You already coach **${currentTeam.team_name}**. Job offers are only for coaches without a team.`, flags: 64,
     });
   }
 
@@ -1012,8 +1012,7 @@ async function handleJobOffers(interaction) {
 
   if (pool.length === 0) {
     return interaction.reply({
-      content: `ℹ️ No available jobs meet the ${config.star_rating_for_offers}⭐ minimum right now. Try again later.`,
-      ephemeral: true,
+      content: `ℹ️ No available jobs meet the ${config.star_rating_for_offers}⭐ minimum right now. Try again later.`, flags: 64,
     });
   }
 
@@ -1078,9 +1077,9 @@ async function sendOffersAsDM(interaction, offers, config, guildId, isExisting) 
   try {
     const dm = await interaction.user.createDM();
     await dm.send({ embeds: [embed], components: rows });
-    await interaction.reply({ content: '📬 Your job offers have been sent to your DMs!', ephemeral: true });
+    await interaction.reply({ content: '📬 Your job offers have been sent to your DMs!', flags: 64 });
   } catch {
-    await interaction.reply({ embeds: [embed], components: rows, ephemeral: true });
+    await interaction.reply({ embeds: [embed], components: rows, flags: 64 });
   }
 }
 
@@ -1253,12 +1252,12 @@ async function handleGameResult(interaction, adminOverride = false) {
 
   let yourTeam = await getTeamByUser(userId, guildId);
   if (!yourTeam) {
-    return interaction.reply({ content: '❌ You don\'t have a team assigned.', ephemeral: true });
+    return interaction.reply({ content: '❌ You don\'t have a team assigned.', flags: 64 });
   }
 
   const oppTeam = await getTeamByName(opponentName, guildId);
   if (!oppTeam) {
-    return interaction.reply({ content: `❌ Team \`${opponentName}\` not found.`, ephemeral: true });
+    return interaction.reply({ content: `❌ Team \`${opponentName}\` not found.`, flags: 64 });
   }
 
   const won  = yourScore > oppScore;
@@ -1329,8 +1328,8 @@ async function handleAnyGameResult(interaction) {
   const team1 = await getTeamByName(team1Name, guildId);
   const team2 = await getTeamByName(team2Name, guildId);
 
-  if (!team1) return interaction.reply({ content: `❌ Team \`${team1Name}\` not found.`, ephemeral: true });
-  if (!team2) return interaction.reply({ content: `❌ Team \`${team2Name}\` not found.`, ephemeral: true });
+  if (!team1) return interaction.reply({ content: `❌ Team \`${team1Name}\` not found.`, flags: 64 });
+  if (!team2) return interaction.reply({ content: `❌ Team \`${team2Name}\` not found.`, flags: 64 });
 
   const record1 = await getRecord(team1.id, meta.season, guildId);
   const record2 = await getRecord(team2.id, meta.season, guildId);
@@ -1385,7 +1384,7 @@ async function handleAnyGameResult(interaction) {
 async function handlePressRelease(interaction) {
   const config = await getConfig(interaction.guildId);
   if (!config.feature_press_releases) {
-    return interaction.reply({ content: '❌ Press releases are disabled in this server.', ephemeral: true });
+    return interaction.reply({ content: '❌ Press releases are disabled in this server.', flags: 64 });
   }
 
   const message   = interaction.options.getString('message');
@@ -1401,7 +1400,7 @@ async function handlePressRelease(interaction) {
 
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
   if (!newsChannel) {
-    return interaction.reply({ content: `❌ News feed channel \`${config.channel_news_feed}\` not found.`, ephemeral: true });
+    return interaction.reply({ content: `❌ News feed channel \`${config.channel_news_feed}\` not found.`, flags: 64 });
   }
 
   await newsChannel.send({ embeds: [embed] });
@@ -1412,14 +1411,14 @@ async function handlePressRelease(interaction) {
     message,
   });
 
-  await interaction.reply({ content: '✅ Press release posted!', ephemeral: true });
+  await interaction.reply({ content: '✅ Press release posted!', flags: 64 });
 }
 
 // /ranking
 async function handleRanking(interaction) {
   const config = await getConfig(interaction.guildId);
   if (!config.feature_rankings) {
-    return interaction.reply({ content: '❌ Rankings are disabled in this server.', ephemeral: true });
+    return interaction.reply({ content: '❌ Rankings are disabled in this server.', flags: 64 });
   }
 
   const meta = await getMeta(interaction.guildId);
@@ -1431,7 +1430,7 @@ async function handleRanking(interaction) {
     .order('wins', { ascending: false });
 
   if (!records || records.length === 0) {
-    return interaction.reply({ content: 'No records found for this season.', ephemeral: true });
+    return interaction.reply({ content: 'No records found for this season.', flags: 64 });
   }
 
   const lines = records.map((r, i) => {
@@ -1458,7 +1457,7 @@ async function handleRankingAllTime(interaction) {
     .eq('guild_id', interaction.guildId);
 
   if (!records || records.length === 0) {
-    return interaction.reply({ content: 'No records found.', ephemeral: true });
+    return interaction.reply({ content: 'No records found.', flags: 64 });
   }
 
   // Aggregate by team
@@ -1566,7 +1565,7 @@ async function handleResetTeam(interaction) {
 
   const team = await getTeamByUser(user.id, guildId);
   if (!team) {
-    return interaction.reply({ content: `❌ <@${user.id}> doesn't have a team assigned.`, ephemeral: true });
+    return interaction.reply({ content: `❌ <@${user.id}> doesn't have a team assigned.`, flags: 64 });
   }
 
   await unassignTeam(team.id, guildId);
@@ -1610,7 +1609,7 @@ async function handleListTeams(interaction) {
   const listsChannel = findTextChannel(interaction.guild, config.channel_team_lists);
   if (listsChannel && listsChannel.id !== interaction.channelId) {
     await listsChannel.send({ embeds: [embed] });
-    await interaction.reply({ content: `✅ Team list posted in ${listsChannel}!`, ephemeral: true });
+    await interaction.reply({ content: `✅ Team list posted in ${listsChannel}!`, flags: 64 });
   } else {
     await interaction.reply({ embeds: [embed] });
   }
@@ -1673,7 +1672,7 @@ async function handleAdvance(interaction) {
   const config  = await getConfig(guildId);
 
   if (!config.feature_advance_system) {
-    return interaction.reply({ content: '❌ The advance system is disabled.', ephemeral: true });
+    return interaction.reply({ content: '❌ The advance system is disabled.', flags: 64 });
   }
 
   const meta       = await getMeta(guildId);
@@ -1687,8 +1686,7 @@ async function handleAdvance(interaction) {
 
   if (!intervals.includes(hoursInput)) {
     return interaction.reply({
-      content: `❌ Invalid interval. Choose from: ${intervals.join(', ')} hours.`,
-      ephemeral: true,
+      content: `❌ Invalid interval. Choose from: ${intervals.join(', ')} hours.`, flags: 64,
     });
   }
 
@@ -1911,7 +1909,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'season-advance':     return handleSeasonAdvance(interaction);
         case 'move-coach':         return handleMoveCoach(interaction);
         default:
-          await interaction.reply({ content: '❓ Unknown command.', ephemeral: true });
+          await interaction.reply({ content: '❓ Unknown command.', flags: 64 });
       }
     }
 
@@ -1945,7 +1943,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   } catch (err) {
     console.error('[interaction] Error:', err);
-    const msg = { content: `❌ An error occurred: ${err.message}`, ephemeral: true };
+    const msg = { content: `❌ An error occurred: ${err.message}`, flags: 64 };
     if (interaction.replied || interaction.deferred) {
       await interaction.followUp(msg).catch(() => {});
     } else {
