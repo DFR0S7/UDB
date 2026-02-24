@@ -100,6 +100,7 @@ async function createDefaultConfig(guildId, leagueName = 'Dynasty League') {
   const { error } = await supabase.from('config').upsert({
     guild_id: guildId,
     league_name: leagueName,
+    league_abbreviation: '',
     feature_job_offers: true,
     feature_stream_reminders: true,
     feature_advance_system: true,
@@ -129,6 +130,7 @@ function buildDefaultConfig(guildId, leagueName = 'Dynasty League') {
   return {
     guild_id: guildId,
     league_name: leagueName,
+    league_abbreviation: '',
     feature_job_offers: true,
     feature_stream_reminders: true,
     feature_advance_system: true,
@@ -432,50 +434,87 @@ function scheduleStreamReminder(channel, userId, guildId, minutes) {
 // /setup
 async function handleSetup(interaction) {
   const guildId = interaction.guildId;
-  await interaction.reply({ content: '⚙️ Starting setup wizard... Please answer the following questions.', ephemeral: true });
+  const userId  = interaction.user.id;
 
-  const filter = m => m.author.id === interaction.user.id;
-  const ch = interaction.channel;
+  // Send setup via DM so it's private and controlled
+  let dm;
+  try {
+    dm = await interaction.user.createDM();
+    await interaction.reply({ content: '📬 Setup wizard sent to your DMs!', ephemeral: true });
+  } catch {
+    // DMs disabled — fall back to the channel ephemerally
+    dm = interaction.channel;
+    await interaction.reply({ content: '⚙️ Starting setup wizard here since your DMs are disabled.', ephemeral: true });
+  }
 
+  // Ask one question at a time and wait for a reply before continuing
   const ask = async (question) => {
-    await ch.send(`**Setup:** ${question}`);
+    await dm.send(question);
     try {
-      const collected = await ch.awaitMessages({ filter, max: 1, time: 60000, errors: ['time'] });
+      const collected = await dm.awaitMessages({
+        filter: m => m.author.id === userId,
+        max: 1,
+        time: 120000,   // 2 minutes to answer each question
+        errors: ['time'],
+      });
       return collected.first().content.trim();
     } catch {
+      await dm.send('⏰ Setup timed out. Run `/setup` again to restart.');
       return null;
     }
   };
 
-  const leagueName = await ask('What is your league name? (e.g., CMR Dynasty)') || 'Dynasty League';
-
-  const featuresMsg = await ch.send(
-    '**Setup:** Which features would you like to enable?\nReply with a comma-separated list of numbers:\n' +
-    '1. Job Offers\n2. Stream Reminders\n3. Advance System\n4. Press Releases\n5. Rankings\n\n' +
-    'Example: `1,2,3,4,5` for all features'
+  // ── Q1: League name ──────────────────────────────────────────────────────
+  const leagueName = await ask(
+    '**Setup (1/4):** What is your league name?\n_Example: CMR Dynasty_'
   );
+  if (!leagueName) return;
 
-  let featureInput;
-  try {
-    const collected = await ch.awaitMessages({ filter, max: 1, time: 60000, errors: ['time'] });
-    featureInput = collected.first().content;
-  } catch { featureInput = '1,2,3,4,5,6'; }
+  // ── Q1b: League abbreviation ──────────────────────────────────────────────
+  const leagueAbbr = await ask(
+    '**Setup (2/4):** What is your league abbreviation or keyword?\nThis will be used to identify your league in stream titles.\n_Example: `CMR`_'
+  );
+  if (!leagueAbbr) return;
 
-  const enabled = (featureInput || '1,2,3,4,5,6').split(',').map(n => parseInt(n.trim()));
+  // ── Q2: Features ─────────────────────────────────────────────────────────
+  const featureInput = await ask(
+    `**Setup (3/4):** Which features would you like to enable?\n` +
+    `Reply with a comma-separated list of numbers:\n\n` +
+    `\`1\` — Job Offers\n` +
+    `\`2\` — Stream Reminders\n` +
+    `\`3\` — Advance System\n` +
+    `\`4\` — Press Releases\n` +
+    `\`5\` — Rankings\n\n` +
+    `_Example: \`1,2,3,4,5\` for all • \`1,3,5\` for some_`
+  );
+  if (!featureInput) return;
+
+  const enabled = featureInput.split(',').map(n => parseInt(n.trim()));
   const features = {
-    feature_job_offers: enabled.includes(1),
+    feature_job_offers:       enabled.includes(1),
     feature_stream_reminders: enabled.includes(2),
-    feature_advance_system: enabled.includes(3),
-    feature_press_releases: enabled.includes(4),
-    feature_rankings: enabled.includes(5),
+    feature_advance_system:   enabled.includes(3),
+    feature_press_releases:   enabled.includes(4),
+    feature_rankings:         enabled.includes(5),
   };
 
-  const advanceIntervals = await ask('What advance intervals (hours) do you want? Enter as JSON array. Default: [24, 48]') || '[24, 48]';
+  // ── Q3: Advance intervals ─────────────────────────────────────────────────
+  const advanceInput = await ask(
+    `**Setup (4/4):** What advance intervals (in hours) do you want available?\n` +
+    `Reply with a JSON array.\n\n` +
+    `_Example: \`[24, 48]\` • \`[12, 24, 48]\`_\n` +
+    `_Type \`default\` to use \`[24, 48]\`_`
+  );
+  if (!advanceInput) return;
 
+  const advanceIntervals = advanceInput.toLowerCase() === 'default' ? '[24, 48]' : advanceInput;
+
+  // ── Save ──────────────────────────────────────────────────────────────────
   try {
     await createDefaultConfig(guildId, leagueName);
     await saveConfig(guildId, {
       league_name: leagueName,
+      league_abbreviation: leagueAbbr,
       ...features,
       advance_intervals: advanceIntervals,
     });
@@ -483,19 +522,21 @@ async function handleSetup(interaction) {
     const embed = new EmbedBuilder()
       .setTitle('✅ Setup Complete!')
       .setColor(0x00ff00)
+      .setDescription('Your league is configured! You can edit any setting anytime with `/config edit` or view all settings with `/config view`.')
       .addFields(
-        { name: 'League Name', value: leagueName, inline: true },
-        { name: 'Job Offers', value: features.feature_job_offers ? '✅' : '❌', inline: true },
-        { name: 'Stream Reminders', value: features.feature_stream_reminders ? '✅' : '❌', inline: true },
-        { name: 'Advance System', value: features.feature_advance_system ? '✅' : '❌', inline: true },
-        { name: 'Press Releases', value: features.feature_press_releases ? '✅' : '❌', inline: true },
-        { name: 'Rankings', value: features.feature_rankings ? '✅' : '❌', inline: true },
-        { name: 'Advance Intervals', value: advanceIntervals, inline: true },
-      )
-      .setDescription('You can edit settings anytime with `/config edit` or view with `/config view`.');
-    await ch.send({ embeds: [embed] });
+        { name: 'League Name',       value: leagueName,   inline: true },
+        { name: 'Abbreviation',       value: leagueAbbr,   inline: true },
+        { name: 'Job Offers',       value: features.feature_job_offers       ? '✅' : '❌', inline: true },
+        { name: 'Stream Reminders', value: features.feature_stream_reminders  ? '✅' : '❌', inline: true },
+        { name: 'Advance System',   value: features.feature_advance_system    ? '✅' : '❌', inline: true },
+        { name: 'Press Releases',   value: features.feature_press_releases    ? '✅' : '❌', inline: true },
+        { name: 'Rankings',         value: features.feature_rankings          ? '✅' : '❌', inline: true },
+        { name: 'Advance Intervals',value: advanceIntervals,                               inline: true },
+      );
+
+    await dm.send({ embeds: [embed] });
   } catch (err) {
-    await ch.send(`❌ Setup failed: ${err.message}`);
+    await dm.send(`❌ Setup failed: ${err.message}`);
   }
 }
 
@@ -507,6 +548,7 @@ async function handleConfigView(interaction) {
     .setColor(config.embed_color_primary_int || 0x1e90ff)
     .addFields(
       { name: '📌 League', value: config.league_name, inline: true },
+      { name: '🔤 Abbreviation', value: config.league_abbreviation || 'Not set', inline: true },
       { name: '🆔 Guild ID', value: config.guild_id, inline: true },
       { name: '\u200b', value: '\u200b', inline: true },
       { name: '🔧 Features', value:
@@ -565,7 +607,7 @@ async function handleConfigEdit(interaction) {
   const setting = interaction.options.getString('setting');
   const value   = interaction.options.getString('value');
   const allowed = [
-    'league_name', 'channel_news_feed', 'channel_advance_tracker', 'channel_team_lists',
+    'league_name', 'league_abbreviation', 'channel_news_feed', 'channel_advance_tracker', 'channel_team_lists',
     'channel_signed_coaches', 'channel_streaming', 'role_head_coach',
     'star_rating_for_offers', 'job_offers_count', 'job_offers_expiry_hours', 'stream_reminder_minutes', 'advance_intervals',
     'embed_color_primary', 'embed_color_win', 'embed_color_loss',

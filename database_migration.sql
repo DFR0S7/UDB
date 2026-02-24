@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS config (
   id                        SERIAL PRIMARY KEY,
   guild_id                  TEXT UNIQUE NOT NULL,
   league_name               TEXT    DEFAULT 'Dynasty League',
+  league_abbreviation       TEXT    DEFAULT '',
 
   -- Feature Toggles
   feature_job_offers        BOOLEAN DEFAULT TRUE,
