@@ -343,7 +343,7 @@ function buildCommands() {
       .addSubcommand(sub =>
         sub.setName('edit')
           .setDescription('Edit a specific config value')
-          .addStringOption(o => o.setName('setting').setDescription('Setting name').setRequired(true))
+          .addStringOption(o => o.setName('setting').setDescription('Setting name').setRequired(true).setAutocomplete(true))
           .addStringOption(o => o.setName('value').setDescription('New value').setRequired(true))
       ),
 
@@ -439,7 +439,7 @@ async function handleSetup(interaction) {
   const guildId = interaction.guildId;
   const userId  = interaction.user.id;
 
-  // Open a DM with the admin and run the entire conversation there
+  // Open a DM with the admin
   let dm;
   try {
     dm = await interaction.user.createDM();
@@ -451,11 +451,13 @@ async function handleSetup(interaction) {
   }
 
   await interaction.reply({ content: '📬 Check your DMs — setup wizard is waiting!', ephemeral: true });
-  await dm.send("👋 **Dynasty Bot Setup Wizard**\nAnswer each question in this DM. You have 2 minutes per question.");
+  await dm.send("👋 **Dynasty Bot Setup Wizard**\nAnswer each question in this DM. You have 2 minutes per step.");
 
   const guild = interaction.guild;
 
-  // ── Generic ask (free text) ───────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  // Free text question
   const ask = async (question) => {
     await dm.send(question);
     try {
@@ -473,30 +475,178 @@ async function handleSetup(interaction) {
     return answer.toLowerCase() === 'default' ? String(defaultVal) : answer;
   };
 
-  // ── Pick list helper — sends a numbered list and returns the chosen item ──
-  const askPickList = async (header, items, labelFn) => {
-    const lines = items.map((item, i) => `\`${i + 1}\` — ${labelFn(item)}`);
-    await dm.send(`${header}\n\n${lines.join('\n')}`);
+  // Button picker — sends message with buttons, returns the customId of the clicked button
+  const askButtons = async (question, buttons) => {
+    // buttons = [{ label, id, style? }]  style: Primary=1 Danger=4 Secondary=2
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 5) {
+      rows.push(new ActionRowBuilder().addComponents(
+        buttons.slice(i, i + 5).map(b =>
+          new ButtonBuilder()
+            .setCustomId(`setup_${b.id}`)
+            .setLabel(b.label)
+            .setStyle(b.style || ButtonStyle.Primary)
+        )
+      ));
+    }
+    const msg = await dm.send({ content: question, components: rows });
     try {
-      const col = await dm.awaitMessages({
-        filter: m => m.author.id === userId && !m.author.bot,
-        max: 1, time: 120000, errors: ['time'],
+      const btnInt = await msg.awaitMessageComponent({
+        filter: i => i.user.id === userId,
+        time: 120000,
       });
-      const idx = parseInt(col.first().content.trim()) - 1;
-      if (isNaN(idx) || idx < 0 || idx >= items.length) {
-        await dm.send('❌ Invalid selection. Run `/setup` again to restart.');
-        return null;
-      }
-      return items[idx];
+      await btnInt.update({ components: [] }); // remove buttons after click
+      return btnInt.customId.replace('setup_', '');
     } catch {
       await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
       return null;
     }
   };
 
-  // Get all text channels and roles from the guild up front
+  // Multi-select buttons — keeps buttons active, toggling selection, until user clicks Done
+  const askMultiButtons = async (question, options) => {
+    // options = [{ label, id }]
+    const selected = new Set();
+
+    const buildRows = () => {
+      const optRows = [];
+      for (let i = 0; i < options.length; i += 4) {
+        optRows.push(new ActionRowBuilder().addComponents(
+          options.slice(i, i + 4).map(o =>
+            new ButtonBuilder()
+              .setCustomId(`msel_${o.id}`)
+              .setLabel((selected.has(o.id) ? '✅ ' : '') + o.label)
+              .setStyle(selected.has(o.id) ? ButtonStyle.Success : ButtonStyle.Secondary)
+          )
+        ));
+      }
+      // All + Done row
+      optRows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('msel_ALL').setLabel('Select All').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('msel_DONE').setLabel('✔ Done').setStyle(ButtonStyle.Success),
+      ));
+      return optRows;
+    };
+
+    const msg = await dm.send({ content: question, components: buildRows() });
+
+    return new Promise(async (resolve) => {
+      const collector = msg.createMessageComponentCollector({
+        filter: i => i.user.id === userId,
+        time: 120000,
+      });
+
+      collector.on('collect', async (btnInt) => {
+        const id = btnInt.customId.replace('msel_', '');
+        if (id === 'DONE') {
+          collector.stop('done');
+          await btnInt.update({ components: [] });
+          resolve([...selected]);
+        } else if (id === 'ALL') {
+          options.forEach(o => selected.add(o.id));
+          await btnInt.update({ components: buildRows() });
+        } else {
+          if (selected.has(id)) selected.delete(id); else selected.add(id);
+          await btnInt.update({ components: buildRows() });
+        }
+      });
+
+      collector.on('end', (_, reason) => {
+        if (reason !== 'done') {
+          dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+          resolve(null);
+        }
+      });
+    });
+  };
+
+  // Channel picker — sends numbered buttons (up to 5 per row), returns chosen channel object
+  const pickChannel = async (question, channels) => {
+    // Use buttons if <=25 channels, otherwise fall back to numbered list
+    if (channels.length <= 25) {
+      const rows = [];
+      for (let i = 0; i < channels.length; i += 5) {
+        rows.push(new ActionRowBuilder().addComponents(
+          channels.slice(i, i + 5).map(c =>
+            new ButtonBuilder()
+              .setCustomId(`ch_${c.id}`)
+              .setLabel('#' + c.name)
+              .setStyle(ButtonStyle.Secondary)
+          )
+        ));
+      }
+      const msg = await dm.send({ content: question, components: rows });
+      try {
+        const btnInt = await msg.awaitMessageComponent({ filter: i => i.user.id === userId, time: 120000 });
+        await btnInt.update({ components: [] });
+        return channels.find(c => c.id === btnInt.customId.replace('ch_', ''));
+      } catch {
+        await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+        return null;
+      }
+    } else {
+      // Fallback: numbered text list
+      const lines = channels.map((c, i) => `\`${i + 1}\` — #${c.name}`).join('\n');
+      await dm.send(`${question}\n\n${lines}`);
+      try {
+        const col = await dm.awaitMessages({ filter: m => m.author.id === userId && !m.author.bot, max: 1, time: 120000, errors: ['time'] });
+        const idx = parseInt(col.first().content.trim()) - 1;
+        if (isNaN(idx) || idx < 0 || idx >= channels.length) {
+          await dm.send('❌ Invalid selection. Run `/setup` again to restart.');
+          return null;
+        }
+        return channels[idx];
+      } catch {
+        await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+        return null;
+      }
+    }
+  };
+
+  // Role picker — same as pickChannel but for roles
+  const pickRole = async (question, roles) => {
+    if (roles.length <= 25) {
+      const rows = [];
+      for (let i = 0; i < roles.length; i += 5) {
+        rows.push(new ActionRowBuilder().addComponents(
+          roles.slice(i, i + 5).map(r =>
+            new ButtonBuilder()
+              .setCustomId(`role_${r.id}`)
+              .setLabel('@' + r.name)
+              .setStyle(ButtonStyle.Secondary)
+          )
+        ));
+      }
+      const msg = await dm.send({ content: question, components: rows });
+      try {
+        const btnInt = await msg.awaitMessageComponent({ filter: i => i.user.id === userId, time: 120000 });
+        await btnInt.update({ components: [] });
+        return roles.find(r => r.id === btnInt.customId.replace('role_', ''));
+      } catch {
+        await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+        return null;
+      }
+    } else {
+      const lines = roles.map((r, i) => `\`${i + 1}\` — @${r.name}`).join('\n');
+      await dm.send(`${question}\n\n${lines}`);
+      try {
+        const col = await dm.awaitMessages({ filter: m => m.author.id === userId && !m.author.bot, max: 1, time: 120000, errors: ['time'] });
+        const idx = parseInt(col.first().content.trim()) - 1;
+        if (isNaN(idx) || idx < 0 || idx >= roles.length) {
+          await dm.send('❌ Invalid selection. Run `/setup` again to restart.');
+          return null;
+        }
+        return roles[idx];
+      } catch {
+        await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+        return null;
+      }
+    }
+  };
+
+  // Fetch channels and roles up front
   const textChannels = guild.channels.cache
-    .filter(c => c.type === 0) // GuildText
+    .filter(c => c.type === 0)
     .sort((a, b) => a.name.localeCompare(b.name))
     .map(c => c);
 
@@ -509,91 +659,101 @@ async function handleSetup(interaction) {
   const leagueName = await ask('**[League 1/2]** What is your league name?\nExample: CMR Dynasty');
   if (!leagueName) return;
 
-  const leagueAbbr = await ask('**[League 2/2]** What is your league abbreviation or keyword?\nThis will be used to identify your league in stream titles.\nExample: CMR');
+  const leagueAbbr = await ask('**[League 2/2]** What is your league abbreviation or keyword?\nExample: CMR');
   if (!leagueAbbr) return;
 
-  // ── Channels ──────────────────────────────────────────────────────────────
-  await dm.send('**— Channel Setup —**\nSelect your channels from the list. Reply with the number next to each channel.');
+  // ── Feature selection (multi-select buttons) ──────────────────────────────
+  const featureOptions = [
+    { label: 'Job Offers',       id: 'job_offers' },
+    { label: 'Stream Reminders', id: 'stream_reminders' },
+    { label: 'Advance System',   id: 'advance_system' },
+    { label: 'Press Releases',   id: 'press_releases' },
+    { label: 'Rankings',         id: 'rankings' },
+  ];
 
-  const newsFeedCh = await askPickList(
-    '**[Channel 1/5]** Which channel should game results and announcements post to? (News Feed)',
-    textChannels, c => `#${c.name}`
+  const selectedFeatures = await askMultiButtons(
+    '**— Feature Selection —**\nToggle features on/off then click ✔ Done. Click **Select All** to enable everything.',
+    featureOptions
   );
-  if (!newsFeedCh) return;
+  if (!selectedFeatures) return;
 
-  const signedCh = await askPickList(
-    '**[Channel 2/5]** Which channel should signing announcements post to? (Signed Coaches)',
-    textChannels, c => `#${c.name}`
-  );
-  if (!signedCh) return;
+  const features = {
+    feature_job_offers:       selectedFeatures.includes('job_offers'),
+    feature_stream_reminders: selectedFeatures.includes('stream_reminders'),
+    feature_advance_system:   selectedFeatures.includes('advance_system'),
+    feature_press_releases:   selectedFeatures.includes('press_releases'),
+    feature_rankings:         selectedFeatures.includes('rankings'),
+  };
 
-  const teamListCh = await askPickList(
-    '**[Channel 3/5]** Which channel should the team availability list post to? (Team Lists)',
-    textChannels, c => `#${c.name}`
-  );
-  if (!teamListCh) return;
+  // ── Channels — only ask for what the enabled features need ───────────────
+  const channelConfig = {
+    channel_news_feed:       'news-feed',
+    channel_signed_coaches:  'signed-coaches',
+    channel_team_lists:      'team-lists',
+    channel_advance_tracker: 'advance-tracker',
+    channel_streaming:       'streaming',
+  };
 
-  const advanceCh = await askPickList(
-    '**[Channel 4/5]** Which channel should advance notices post to? (Advance Tracker)',
-    textChannels, c => `#${c.name}`
-  );
-  if (!advanceCh) return;
+  const needsNewsFeed    = features.feature_press_releases || features.feature_rankings;
+  const needsSigned      = features.feature_job_offers;
+  const needsTeamList    = features.feature_job_offers;
+  const needsAdvance     = features.feature_advance_system;
+  const needsStreaming   = features.feature_stream_reminders;
 
-  const streamCh = await askPickList(
-    '**[Channel 5/5]** Which channel should stream links be monitored in? (Streaming)',
-    textChannels, c => `#${c.name}`
-  );
-  if (!streamCh) return;
+  const anyChannel = needsNewsFeed || needsSigned || needsTeamList || needsAdvance || needsStreaming;
 
-  // ── Head Coach Role ───────────────────────────────────────────────────────
-  let headCoachRole;
-  if (roles.length > 0) {
-    headCoachRole = await askPickList(
-      '**— Role Setup —**\nWhich role should be assigned to head coaches?\n(If the role does not exist yet, pick the closest one — you can update it later with `/config edit`)',
-      roles, r => `@${r.name}`
-    );
-    if (!headCoachRole) return;
-  } else {
-    await dm.send('⚠️ No roles found in the server. The bot will create a "head coach" role automatically when the first coach is assigned.');
+  if (anyChannel) {
+    await dm.send('**— Channel Setup —**\nSelect the channel for each feature you enabled.');
+
+    if (needsNewsFeed) {
+      const ch = await pickChannel('📰 **News Feed** — Where should game results and weekly summary post?', textChannels);
+      if (!ch) return;
+      channelConfig.channel_news_feed = ch.name;
+    }
+
+    if (needsSigned) {
+      const ch = await pickChannel('✍️ **Signed Coaches** — Where should coach signing announcements post?', textChannels);
+      if (!ch) return;
+      channelConfig.channel_signed_coaches = ch.name;
+    }
+
+    if (needsTeamList) {
+      const ch = await pickChannel('📋 **Team Lists** — Where should the available teams list post?', textChannels);
+      if (!ch) return;
+      channelConfig.channel_team_lists = ch.name;
+    }
+
+    if (needsAdvance) {
+      const ch = await pickChannel('⏱️ **Advance Tracker** — Where should advance deadline notices post?', textChannels);
+      if (!ch) return;
+      channelConfig.channel_advance_tracker = ch.name;
+    }
+
+    if (needsStreaming) {
+      const ch = await pickChannel('🎮 **Streaming** — Which channel should the bot monitor for stream links?', textChannels);
+      if (!ch) return;
+      channelConfig.channel_streaming = ch.name;
+    }
   }
 
-  const channelConfig = {
-    channel_news_feed:       newsFeedCh.name,
-    channel_signed_coaches:  signedCh.name,
-    channel_team_lists:      teamListCh.name,
-    channel_advance_tracker: advanceCh.name,
-    channel_streaming:       streamCh.name,
-    role_head_coach:         headCoachRole ? headCoachRole.name : 'head coach',
-    role_head_coach_id:      headCoachRole ? headCoachRole.id   : null,
-  };
+  // ── Head Coach Role ───────────────────────────────────────────────────────
+  let headCoachRoleName = 'head coach';
+  let headCoachRoleId   = null;
 
-  // ── Features ──────────────────────────────────────────────────────────────
-  const featureInput = await ask(
-    '**— Feature Selection —**\n' +
-    'Which features would you like to enable? Reply with a comma-separated list:\n\n' +
-    '1 — Job Offers\n' +
-    '2 — Stream Reminders\n' +
-    '3 — Advance System\n' +
-    '4 — Press Releases\n' +
-    '5 — Rankings\n\n' +
-    'Example: 1,2,3,4,5 for all'
-  );
-  if (!featureInput) return;
-
-  const enabled = featureInput.split(',').map(n => parseInt(n.trim()));
-  const features = {
-    feature_job_offers:       enabled.includes(1),
-    feature_stream_reminders: enabled.includes(2),
-    feature_advance_system:   enabled.includes(3),
-    feature_press_releases:   enabled.includes(4),
-    feature_rankings:         enabled.includes(5),
-  };
+  if (roles.length > 0) {
+    const role = await pickRole('**— Role Setup —**\nWhich role should be assigned to head coaches?', roles);
+    if (!role) return;
+    headCoachRoleName = role.name;
+    headCoachRoleId   = role.id;
+  } else {
+    await dm.send('⚠️ No roles found. The bot will create a "head coach" role automatically when the first coach is assigned.');
+  }
 
   // ── Job Offers follow-up ──────────────────────────────────────────────────
   let jobOffersConfig = { star_rating_for_offers: 2.5, star_rating_max_for_offers: null, job_offers_count: 3, job_offers_expiry_hours: 24 };
 
   if (features.feature_job_offers) {
-    await dm.send('**— Job Offers Setup —**\nYou enabled job offers. Answer the next 4 questions to configure it.');
+    await dm.send('**— Job Offers Setup —**\nAnswer the next 4 questions to configure job offers.');
 
     const starMin = await askWithDefault('**[Job Offers 1/4]** Minimum star rating for job offers? (1.0 – 5.0)\nDefault: 2.5', '2.5');
     if (!starMin) return;
@@ -604,7 +764,7 @@ async function handleSetup(interaction) {
     const offersCount = await askWithDefault('**[Job Offers 3/4]** How many offers should each user receive?\nDefault: 3', '3');
     if (!offersCount) return;
 
-    const offersExpiry = await askWithDefault('**[Job Offers 4/4]** How many hours should offers last before expiring? (1 – 24 hours)\nDefault: 24', '24');
+    const offersExpiry = await askWithDefault('**[Job Offers 4/4]** How many hours should offers last before expiring? (1–24)\nDefault: 24', '24');
     if (!offersExpiry) return;
 
     jobOffersConfig = {
@@ -644,6 +804,8 @@ async function handleSetup(interaction) {
       league_name:         leagueName,
       league_abbreviation: leagueAbbr,
       ...channelConfig,
+      role_head_coach:     headCoachRoleName,
+      role_head_coach_id:  headCoachRoleId,
       ...features,
       ...jobOffersConfig,
       ...streamConfig,
@@ -651,23 +813,24 @@ async function handleSetup(interaction) {
     });
 
     const summaryFields = [
-      { name: 'League Name',      value: leagueName,              inline: true },
-      { name: 'Abbreviation',     value: leagueAbbr,              inline: true },
-      { name: '​',           value: '​',                inline: true },
-      { name: 'News Feed',        value: `#${newsFeedCh.name}`,   inline: true },
-      { name: 'Signed Coaches',   value: `#${signedCh.name}`,     inline: true },
-      { name: 'Team Lists',       value: `#${teamListCh.name}`,   inline: true },
-      { name: 'Advance Tracker',  value: `#${advanceCh.name}`,    inline: true },
-      { name: 'Streaming',        value: `#${streamCh.name}`,     inline: true },
-      { name: 'Head Coach Role',  value: channelConfig.role_head_coach, inline: true },
-      { name: '​',           value: '​',                inline: true },
-      { name: 'Job Offers',       value: features.feature_job_offers       ? '✅' : '❌', inline: true },
+      { name: 'League Name',    value: leagueName,  inline: true },
+      { name: 'Abbreviation',   value: leagueAbbr,  inline: true },
+      { name: '\u200b',         value: '\u200b',     inline: true },
+      { name: 'Job Offers',     value: features.feature_job_offers       ? '✅' : '❌', inline: true },
       { name: 'Stream Reminders', value: features.feature_stream_reminders ? '✅' : '❌', inline: true },
-      { name: 'Advance System',   value: features.feature_advance_system   ? '✅' : '❌', inline: true },
-      { name: 'Press Releases',   value: features.feature_press_releases   ? '✅' : '❌', inline: true },
-      { name: 'Rankings',         value: features.feature_rankings         ? '✅' : '❌', inline: true },
-      { name: '​',           value: '​',                inline: true },
+      { name: 'Advance System', value: features.feature_advance_system   ? '✅' : '❌', inline: true },
+      { name: 'Press Releases', value: features.feature_press_releases   ? '✅' : '❌', inline: true },
+      { name: 'Rankings',       value: features.feature_rankings         ? '✅' : '❌', inline: true },
+      { name: '\u200b',         value: '\u200b',     inline: true },
     ];
+
+    if (needsNewsFeed)  summaryFields.push({ name: 'News Feed',       value: '#' + channelConfig.channel_news_feed,       inline: true });
+    if (needsSigned)    summaryFields.push({ name: 'Signed Coaches',  value: '#' + channelConfig.channel_signed_coaches,  inline: true });
+    if (needsTeamList)  summaryFields.push({ name: 'Team Lists',      value: '#' + channelConfig.channel_team_lists,      inline: true });
+    if (needsAdvance)   summaryFields.push({ name: 'Advance Tracker', value: '#' + channelConfig.channel_advance_tracker, inline: true });
+    if (needsStreaming) summaryFields.push({ name: 'Streaming',       value: '#' + channelConfig.channel_streaming,       inline: true });
+    summaryFields.push({ name: 'Head Coach Role', value: '@' + headCoachRoleName, inline: true });
+    summaryFields.push({ name: '\u200b', value: '\u200b', inline: true });
 
     if (features.feature_job_offers) {
       const maxStr = jobOffersConfig.star_rating_max_for_offers ? jobOffersConfig.star_rating_max_for_offers + ' stars' : 'No cap';
@@ -678,12 +841,8 @@ async function handleSetup(interaction) {
         { name: 'Offer Expiry',    value: jobOffersConfig.job_offers_expiry_hours + ' hrs',   inline: true },
       );
     }
-    if (features.feature_stream_reminders) {
-      summaryFields.push({ name: 'Stream Reminder', value: streamConfig.stream_reminder_minutes + ' min', inline: true });
-    }
-    if (features.feature_advance_system) {
-      summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals, inline: true });
-    }
+    if (features.feature_stream_reminders) summaryFields.push({ name: 'Stream Reminder',  value: streamConfig.stream_reminder_minutes + ' min', inline: true });
+    if (features.feature_advance_system)   summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals,              inline: true });
 
     const embed = new EmbedBuilder()
       .setTitle('✅ Setup Complete!')
@@ -1458,6 +1617,57 @@ async function handleListTeams(interaction) {
 }
 
 // /advance
+// Build and post a weekly recap embed for the current week
+async function postWeeklyRecap(guild, guildId, config, meta) {
+  const newsChannel = findTextChannel(guild, config.channel_news_feed);
+  if (!newsChannel) return;
+
+  const { data: results } = await supabase
+    .from('results')
+    .select('*, team1:teams!results_team1_id_fkey(team_name, conference), team2:teams!results_team2_id_fkey(team_name, conference)')
+    .eq('guild_id', guildId)
+    .eq('season', meta.season)
+    .eq('week', meta.week)
+    .order('created_at', { ascending: true });
+
+  if (!results || results.length === 0) {
+    // No games submitted this week — skip recap
+    return;
+  }
+
+  // Group results by conference if possible
+  const lines = results.map(r => {
+    const t1 = r.team1?.team_name || 'Team 1';
+    const t2 = r.team2?.team_name || 'Team 2';
+    const winner = r.score1 > r.score2 ? t1 : r.score2 > r.score1 ? t2 : null;
+    const trophy = winner ? '🏆' : '🤝';
+    return `${trophy} **${t1}** ${r.score1} — ${r.score2} **${t2}**`;
+  });
+
+  // Split into chunks of 15 lines max per embed field (Discord 1024 char limit)
+  const chunkSize = 15;
+  const chunks = [];
+  for (let i = 0; i < lines.length; i += chunkSize) {
+    chunks.push(lines.slice(i, i + chunkSize));
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📋 Week ${meta.week} Recap — ${config.league_name}`)
+    .setColor(config.embed_color_primary_int)
+    .setDescription(`Season **${meta.season}** · Week **${meta.week}** · **${results.length}** game${results.length !== 1 ? 's' : ''} played`)
+    .setTimestamp();
+
+  chunks.forEach((chunk, i) => {
+    embed.addFields({
+      name: chunks.length > 1 ? `Results (${i + 1}/${chunks.length})` : 'Results',
+      value: chunk.join("\n"),
+      inline: false,
+    });
+  });
+
+  await newsChannel.send({ embeds: [embed] });
+}
+
 async function handleAdvance(interaction) {
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
@@ -1502,6 +1712,12 @@ async function handleAdvance(interaction) {
         inline: false },
     )
     .setTimestamp();
+
+  // Post weekly recap to news feed before announcing the new week
+  await postWeeklyRecap(interaction.guild, guildId, config, meta);
+
+  // Bump the week in meta
+  await setMeta(guildId, { week: meta.week + 1, advance_hours: hoursInput, advance_deadline: deadline.toISOString() });
 
   const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
   await interaction.reply({ embeds: [embed] });
@@ -1632,6 +1848,33 @@ async function handleAutocomplete(interaction) {
         name: a.teams.team_name + (a.teams.conference ? ' · ' + a.teams.conference : ''),
         value: a.teams.team_name,
       }));
+  }
+
+  else if (commandName === 'config' && focused.name === 'setting') {
+    const allSettings = [
+      { name: 'league_name',                  hint: 'League display name' },
+      { name: 'league_abbreviation',          hint: 'Short name for stream detection' },
+      { name: 'channel_news_feed',            hint: 'Channel for results & announcements' },
+      { name: 'channel_advance_tracker',      hint: 'Channel for advance notices' },
+      { name: 'channel_team_lists',           hint: 'Channel for team availability list' },
+      { name: 'channel_signed_coaches',       hint: 'Channel for signing announcements' },
+      { name: 'channel_streaming',            hint: 'Channel to monitor for stream links' },
+      { name: 'role_head_coach',              hint: 'Role name assigned to coaches' },
+      { name: 'star_rating_for_offers',       hint: 'Minimum star rating for job offers' },
+      { name: 'star_rating_max_for_offers',   hint: 'Maximum star rating for job offers' },
+      { name: 'job_offers_count',             hint: 'Number of offers per user' },
+      { name: 'job_offers_expiry_hours',      hint: 'Hours before offers expire (1–24)' },
+      { name: 'stream_reminder_minutes',      hint: 'Minutes before stream reminder fires' },
+      { name: 'advance_intervals',            hint: 'Available advance intervals e.g. [24,48]' },
+      { name: 'embed_color_primary',          hint: 'Primary embed color hex e.g. 0x1e90ff' },
+      { name: 'embed_color_win',              hint: 'Win result embed color hex' },
+      { name: 'embed_color_loss',             hint: 'Loss result embed color hex' },
+    ];
+
+    choices = allSettings
+      .filter(s => s.name.includes(query) || s.hint.toLowerCase().includes(query))
+      .slice(0, 25)
+      .map(s => ({ name: `${s.name} — ${s.hint}`, value: s.name }));
   }
 
   await interaction.respond(choices);
