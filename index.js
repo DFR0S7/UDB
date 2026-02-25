@@ -135,7 +135,15 @@ const CONFIG_DEFAULTS = {
 
 function parseConfig(data) {
   let intervals = [24, 48];
-  try { intervals = JSON.parse(data.advance_intervals); } catch (_) {}
+  try {
+    const parsed = JSON.parse(data.advance_intervals);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      intervals = parsed.map(Number).filter(n => !isNaN(n));
+    }
+  } catch (_) {
+    console.warn(`[config] Could not parse advance_intervals: "${data.advance_intervals}" — using default [24, 48]`);
+  }
+  console.log(`[config] advance_intervals for guild ${data.guild_id}: "${data.advance_intervals}" → parsed as [${intervals}]`);
   return {
     ...data,
     advance_intervals_parsed: intervals,
@@ -1570,7 +1578,10 @@ async function postWeeklyRecap(guild, guildId, config, meta) {
 // /advance ────────────────────────────────────────────
 async function handleAdvance(interaction) {
   const guildId = interaction.guildId;
-  const config  = await getConfig(guildId);
+
+  // Always load fresh config for /advance so interval changes take effect immediately
+  guildConfigs.delete(guildId);
+  const config  = await loadGuildConfig(guildId);
 
   if (!config.feature_advance_system) {
     return interaction.reply({ content: '❌ **Advance System Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 });
