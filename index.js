@@ -1824,8 +1824,8 @@ if (advanceChannel) {
   }
 
   // Build the message content
-  const content = `${mention} We have advanced to Week ${newWeek}${
-    nextAdvanceMessage ? '\n' + nextAdvanceMessage : ''
+  const content = `${mention} We have advanced to Week $$   {meta.week + 1}   $${
+  nextAdvanceMessage ? '\n' + nextAdvanceMessage : ''
   }`;
 
   // Send mention + embed
