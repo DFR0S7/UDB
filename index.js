@@ -1765,12 +1765,49 @@ async function handleAdvance(interaction) {
 
   // Post publicly to advance-tracker channel
   const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
-  if (advanceChannel) {
-    await advanceChannel.send({ embeds: [embed] });
-    await interaction.editReply({ content: `✅ Advance posted in ${advanceChannel}!` });
+
+if (advanceChannel) {
+  let mention = '';
+  let mentionType = 'none';
+
+  // Step 1: Try to find the configured head coach role
+  const headCoachRoleName = (config.role_head_coach || 'head coach').trim();
+  const headCoachRole = interaction.guild.roles.cache.find(
+    r => r.name.toLowerCase() === headCoachRoleName.toLowerCase()
+  );
+
+  if (headCoachRole) {
+    mention = `<@&${headCoachRole.id}>`;
+    mentionType = 'role';
+    console.log(`[advance] Mentioning head coach role: @${headCoachRole.name} in guild ${guildId}`);
   } else {
-    await interaction.editReply({ embeds: [embed] });
+    // Step 2: Fallback to @everyone
+    mention = '@everyone';
+    mentionType = 'everyone';
+    console.warn(
+      `[advance] Head coach role "${headCoachRoleName}" not found in guild ${guildId} — falling back to @everyone`
+    );
   }
+
+  // Build the message content
+  const content = `${mention} We have advanced to Week ${newWeek}${
+    nextAdvanceMessage ? '\n' + nextAdvanceMessage : ''
+  }`;
+
+  // Send mention + embed
+  await advanceChannel.send({
+    content,
+    embeds: [embed]   // your existing recap embed
+  });
+
+  // Optional: reply to admin with feedback
+  await interaction.editReply(
+    `✅ Advance posted in ${advanceChannel.name} with **${mentionType}** mention.`
+  );
+} else {
+  // No advance channel configured → just reply with embed
+  await interaction.editReply({ embeds: [embed] });
+}
 }
 
 // /season-advance ─────────────────────────────────────
