@@ -1,9 +1,12 @@
 // =====================================================
 // Universal Dynasty League Bot - index.js
-// Version: 2.0.0 (Universal Multi-Server)
+// Version: 2.1.0 (Universal Multi-Server)
 // =====================================================
 
 require('dotenv').config();
+const http  = require('http');
+const https = require('https');
+
 const {
   Client,
   GatewayIntentBits,
@@ -25,12 +28,17 @@ const { createClient } = require('@supabase/supabase-js');
 // =====================================================
 // ENVIRONMENT & CLIENTS
 // =====================================================
-const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
-const SUPABASE_URL    = process.env.SUPABASE_URL;
-const SUPABASE_KEY    = process.env.SUPABASE_KEY;
-const CLIENT_ID       = process.env.CLIENT_ID;
-const PORT            = process.env.PORT || 3000;
-const SELF_PING_URL   = process.env.SELF_PING_URL || '';
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const SUPABASE_URL  = process.env.SUPABASE_URL;
+const SUPABASE_KEY  = process.env.SUPABASE_KEY;
+const CLIENT_ID     = process.env.CLIENT_ID;
+const PORT          = process.env.PORT || 3000;
+const SELF_PING_URL = process.env.SELF_PING_URL || '';
+
+if (!DISCORD_TOKEN || !SUPABASE_URL || !SUPABASE_KEY || !CLIENT_ID) {
+  console.error('[boot] Missing required environment variables. Check DISCORD_TOKEN, SUPABASE_URL, SUPABASE_KEY, CLIENT_ID.');
+  process.exit(1);
+}
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -46,9 +54,96 @@ const client = new Client({
 });
 
 // =====================================================
+// HEALTH SERVER (always on for Render)
+// =====================================================
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('Dynasty Bot OK');
+}).listen(PORT, () => {
+  console.log(`[server] HTTP server listening on port ${PORT}`);
+});
+
+// =====================================================
+// SELF-PING (keep Render free tier alive)
+// =====================================================
+if (SELF_PING_URL) {
+  setInterval(() => {
+    const mod = SELF_PING_URL.startsWith('https') ? https : http;
+    mod.get(SELF_PING_URL, () => {}).on('error', () => {});
+  }, 14 * 60 * 1000);
+  console.log(`[server] Self-ping enabled → ${SELF_PING_URL}`);
+}
+
+// =====================================================
+// GLOBAL ERROR HANDLERS — keep process alive on errors
+// =====================================================
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] Unhandled Rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[process] Uncaught Exception:', err);
+});
+
+client.on('error', (err) => {
+  console.error('[discord] Client error:', err);
+});
+
+client.on('shardDisconnect', (event, shardId) => {
+  console.warn(`[discord] Shard ${shardId} disconnected. Code: ${event.code}`);
+});
+
+client.on('shardReconnecting', (shardId) => {
+  console.log(`[discord] Shard ${shardId} reconnecting...`);
+});
+
+client.on('shardResume', (shardId, replayed) => {
+  console.log(`[discord] Shard ${shardId} resumed. Replayed ${replayed} events.`);
+});
+
+// =====================================================
 // CONFIG CACHE (per guild)
 // =====================================================
 const guildConfigs = new Map();
+
+// Single source of truth for default config values
+const CONFIG_DEFAULTS = {
+  league_name:               'Dynasty League',
+  league_abbreviation:       '',
+  feature_job_offers:        true,
+  feature_stream_reminders:  true,
+  feature_advance_system:    true,
+  feature_press_releases:    true,
+  feature_rankings:          true,
+  channel_news_feed:         'news-feed',
+  channel_advance_tracker:   'advance-tracker',
+  channel_team_lists:        'team-lists',
+  channel_signed_coaches:    'signed-coaches',
+  channel_streaming:         'streaming',
+  role_head_coach:           'head coach',
+  role_head_coach_id:        null,
+  star_rating_for_offers:    2.5,
+  star_rating_max_for_offers: null,
+  job_offers_count:          3,
+  job_offers_expiry_hours:   48,
+  stream_reminder_minutes:   45,
+  advance_intervals:         '[24, 48]',
+  embed_color_primary:       '0x1e90ff',
+  embed_color_win:           '0x00ff00',
+  embed_color_loss:          '0xff0000',
+};
+
+function parseConfig(data) {
+  let intervals = [24, 48];
+  try { intervals = JSON.parse(data.advance_intervals); } catch (_) {}
+  return {
+    ...data,
+    advance_intervals_parsed: intervals,
+    embed_color_primary_int:  parseInt(data.embed_color_primary, 16) || 0x1e90ff,
+    embed_color_win_int:      parseInt(data.embed_color_win, 16)     || 0x00ff00,
+    embed_color_loss_int:     parseInt(data.embed_color_loss, 16)    || 0xff0000,
+  };
+}
 
 async function loadGuildConfig(guildId) {
   const { data, error } = await supabase
@@ -58,30 +153,25 @@ async function loadGuildConfig(guildId) {
     .single();
 
   if (error || !data) {
-    console.log(`[config] No config found for guild ${guildId}, using defaults.`);
-    const defaults = buildDefaultConfig(guildId);
+    console.log(`[config] No config for guild ${guildId}, using defaults.`);
+    const defaults = parseConfig({ ...CONFIG_DEFAULTS, guild_id: guildId,
+      advance_intervals_parsed: [24, 48],
+      embed_color_primary_int: 0x1e90ff,
+      embed_color_win_int: 0x00ff00,
+      embed_color_loss_int: 0xff0000,
+    });
     guildConfigs.set(guildId, defaults);
     return defaults;
   }
 
-  // Parse advance_intervals JSON
-  let intervals = [24, 48];
-  try { intervals = JSON.parse(data.advance_intervals); } catch (_) {}
-  data.advance_intervals_parsed = intervals;
-
-  // Parse colors
-  data.embed_color_primary_int = parseInt(data.embed_color_primary, 16) || 0x1e90ff;
-  data.embed_color_win_int     = parseInt(data.embed_color_win, 16)     || 0x00ff00;
-  data.embed_color_loss_int    = parseInt(data.embed_color_loss, 16)    || 0xff0000;
-
-  guildConfigs.set(guildId, data);
+  const parsed = parseConfig(data);
+  guildConfigs.set(guildId, parsed);
   console.log(`[config] Loaded config for guild ${guildId}: ${data.league_name}`);
-  return data;
+  return parsed;
 }
 
 async function getConfig(guildId) {
-  if (guildConfigs.has(guildId)) return guildConfigs.get(guildId);
-  return loadGuildConfig(guildId);
+  return guildConfigs.get(guildId) || loadGuildConfig(guildId);
 }
 
 async function saveConfig(guildId, updates) {
@@ -91,83 +181,28 @@ async function saveConfig(guildId, updates) {
     .update(updates)
     .eq('guild_id', guildId);
   if (error) throw error;
-  // Bust cache
   guildConfigs.delete(guildId);
   return loadGuildConfig(guildId);
 }
 
 async function createDefaultConfig(guildId, leagueName = 'Dynasty League') {
-  const defaults = buildDefaultConfig(guildId, leagueName);
-  const { error } = await supabase.from('config').upsert({
-    guild_id: guildId,
-    league_name: leagueName,
-    league_abbreviation: '',
-    feature_job_offers: true,
-    feature_stream_reminders: true,
-    feature_advance_system: true,
-    feature_press_releases: true,
-    feature_rankings: true,
-    channel_news_feed: 'news-feed',
-    channel_advance_tracker: 'advance-tracker',
-    channel_team_lists: 'team-lists',
-    channel_signed_coaches: 'signed-coaches',
-    channel_streaming: 'streaming',
-    role_head_coach: 'head coach',
-    star_rating_for_offers: 2.5,
-    star_rating_max_for_offers: null,
-    job_offers_count: 3,
-    job_offers_expiry_hours: 48,
-    stream_reminder_minutes: 45,
-    advance_intervals: '[24, 48]',
-    embed_color_primary: '0x1e90ff',
-    embed_color_win: '0x00ff00',
-    embed_color_loss: '0xff0000',
-  }, { onConflict: 'guild_id' });
+  const { error } = await supabase.from('config').upsert(
+    { ...CONFIG_DEFAULTS, guild_id: guildId, league_name: leagueName },
+    { onConflict: 'guild_id' }
+  );
   if (error) throw error;
   guildConfigs.delete(guildId);
   return loadGuildConfig(guildId);
-}
-
-function buildDefaultConfig(guildId, leagueName = 'Dynasty League') {
-  return {
-    guild_id: guildId,
-    league_name: leagueName,
-    league_abbreviation: '',
-    feature_job_offers: true,
-    feature_stream_reminders: true,
-    feature_advance_system: true,
-    feature_press_releases: true,
-    feature_rankings: true,
-    channel_news_feed: 'news-feed',
-    channel_advance_tracker: 'advance-tracker',
-    channel_team_lists: 'team-lists',
-    channel_signed_coaches: 'signed-coaches',
-    channel_streaming: 'streaming',
-    role_head_coach: 'head coach',
-    role_head_coach_id: null,
-    star_rating_for_offers: 2.5,
-    star_rating_max_for_offers: null,
-    job_offers_count: 3,
-    job_offers_expiry_hours: 48,
-    stream_reminder_minutes: 45,
-    advance_intervals: '[24, 48]',
-    advance_intervals_parsed: [24, 48],
-    embed_color_primary: '0x1e90ff',
-    embed_color_win: '0x00ff00',
-    embed_color_loss: '0xff0000',
-    embed_color_primary_int: 0x1e90ff,
-    embed_color_win_int: 0x00ff00,
-    embed_color_loss_int: 0xff0000,
-  };
 }
 
 // =====================================================
 // DISCORD HELPERS
 // =====================================================
 function findTextChannel(guild, name) {
+  if (!name) return null;
   return guild.channels.cache.find(
     c => c.type === ChannelType.GuildText && c.name.toLowerCase() === name.toLowerCase()
-  );
+  ) || null;
 }
 
 async function findOrCreateRole(guild, roleName) {
@@ -178,12 +213,6 @@ async function findOrCreateRole(guild, roleName) {
   return role;
 }
 
-
-function isAdminOrMod(member) {
-  return member.permissions.has(PermissionFlagsBits.ManageGuild) ||
-         member.permissions.has(PermissionFlagsBits.Administrator);
-}
-
 function starRating(rating) {
   const full  = Math.floor(rating);
   const half  = (rating % 1) >= 0.5 ? 1 : 0;
@@ -191,10 +220,20 @@ function starRating(rating) {
   return '⭐'.repeat(full) + (half ? '½' : '') + '☆'.repeat(empty);
 }
 
+// Post an embed to a channel, logging a warning if the channel isn't found
+async function postToChannel(guild, channelName, payload) {
+  const ch = findTextChannel(guild, channelName);
+  if (!ch) {
+    console.warn(`[post] Channel not found: "${channelName}"`);
+    return null;
+  }
+  await ch.send(payload);
+  return ch;
+}
+
 // =====================================================
 // SUPABASE HELPERS
 // =====================================================
-// Get the team a user is assigned to in a specific guild
 async function getTeamByUser(userId, guildId) {
   const { data } = await supabase
     .from('team_assignments')
@@ -205,7 +244,6 @@ async function getTeamByUser(userId, guildId) {
   return data ? { ...data.teams, user_id: data.user_id, assignment_id: data.id } : null;
 }
 
-// Get a team by name (global) and attach assignment info for a specific guild
 async function getTeamByName(teamName, guildId) {
   const { data: team } = await supabase
     .from('teams')
@@ -224,12 +262,8 @@ async function getTeamByName(teamName, guildId) {
   return { ...team, user_id: assignment?.user_id || null, assignment_id: assignment?.id || null };
 }
 
-// Get all global teams with assignment info for a specific guild
 async function getAllTeams(guildId) {
-  const { data: teams } = await supabase
-    .from('teams')
-    .select('*')
-    .order('team_name');
+  const { data: teams } = await supabase.from('teams').select('*').order('team_name');
   if (!teams) return [];
 
   const { data: assignments } = await supabase
@@ -242,25 +276,17 @@ async function getAllTeams(guildId) {
 
   return teams.map(t => ({
     ...t,
-    user_id: assignMap[t.id]?.user_id || null,
-    assignment_id: assignMap[t.id]?.id || null,
+    user_id:       assignMap[t.id]?.user_id || null,
+    assignment_id: assignMap[t.id]?.id      || null,
   }));
 }
 
-// Get all unassigned teams for a specific guild
-async function getAvailableTeams(guildId) {
-  const all = await getAllTeams(guildId);
-  return all.filter(t => !t.user_id);
-}
-
-// Assign a team to a user in a guild
 async function assignTeam(teamId, userId, guildId) {
   await supabase
     .from('team_assignments')
     .upsert({ team_id: teamId, user_id: userId, guild_id: guildId }, { onConflict: 'team_id,guild_id' });
 }
 
-// Remove a team assignment for a user in a guild
 async function unassignTeam(teamId, guildId) {
   await supabase
     .from('team_assignments')
@@ -270,11 +296,7 @@ async function unassignTeam(teamId, guildId) {
 }
 
 async function getMeta(guildId) {
-  const { data } = await supabase
-    .from('meta')
-    .select('*')
-    .eq('guild_id', guildId)
-    .single();
+  const { data } = await supabase.from('meta').select('*').eq('guild_id', guildId).single();
   return data || { season: 1, week: 1, advance_hours: 24, advance_deadline: null };
 }
 
@@ -298,11 +320,32 @@ async function upsertRecord(record) {
 }
 
 // =====================================================
+// STREAM REMINDER TRACKING
+// =====================================================
+const streamReminderTimers = new Map(); // `${guildId}-${channelId}-${userId}` → timeout
+
+function scheduleStreamReminder(channel, userId, guildId, minutes) {
+  const key = `${guildId}-${channel.id}-${userId}`;
+  if (streamReminderTimers.has(key)) return;
+  const timer = setTimeout(async () => {
+    streamReminderTimers.delete(key);
+    try {
+      await channel.send(
+        `<@${userId}> ⏰ **Stream Reminder:** ${minutes} minutes have passed since you posted your stream link! Make sure you've notified your opponent.`
+      );
+    } catch (e) {
+      console.error('[stream] Could not send reminder:', e.message);
+    }
+  }, minutes * 60 * 1000);
+  streamReminderTimers.set(key, timer);
+}
+
+// =====================================================
 // SLASH COMMANDS DEFINITION
 // =====================================================
 function buildCommands() {
   return [
-    // ---- USER COMMANDS ----
+    // ── User Commands ──────────────────────────────
     new SlashCommandBuilder()
       .setName('joboffers')
       .setDescription('Get coaching job offers based on your current team rating'),
@@ -327,7 +370,7 @@ function buildCommands() {
       .setName('ranking-all-time')
       .setDescription('View all-time win/loss rankings'),
 
-    // ---- ADMIN COMMANDS ----
+    // ── Admin Commands ─────────────────────────────
     new SlashCommandBuilder()
       .setName('setup')
       .setDescription('Interactive bot configuration wizard (Admin only)')
@@ -392,6 +435,12 @@ function buildCommands() {
       .addStringOption(o => o.setName('team2').setDescription('Second team name').setRequired(true).setAutocomplete(true))
       .addIntegerOption(o => o.setName('score1').setDescription('Team 1 score').setRequired(true))
       .addIntegerOption(o => o.setName('score2').setDescription('Team 2 score').setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('checkpermissions')
+      .setDescription('Check if the bot has all required permissions (Admin only)')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
   ].map(cmd => cmd.toJSON());
 }
 
@@ -399,7 +448,7 @@ function buildCommands() {
 // REGISTER SLASH COMMANDS
 // =====================================================
 async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+  const rest     = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
   const commands = buildCommands();
   try {
     console.log('[commands] Registering global slash commands...');
@@ -411,75 +460,52 @@ async function registerCommands() {
 }
 
 // =====================================================
-// STREAM REMINDER TRACKING
-// =====================================================
-const streamReminderTimers = new Map(); // channelId -> timeout
-
-function scheduleStreamReminder(channel, userId, guildId, minutes) {
-  const key = `${guildId}-${channel.id}-${userId}`;
-  if (streamReminderTimers.has(key)) return; // already scheduled
-  const ms = minutes * 60 * 1000;
-  const timer = setTimeout(async () => {
-    streamReminderTimers.delete(key);
-    try {
-      await channel.send(`<@${userId}> ⏰ **Stream Reminder:** ${minutes} minutes have passed since you posted your stream link! Make sure you've notified your opponent.`);
-    } catch (e) {
-      console.error('[stream] Could not send reminder:', e.message);
-    }
-  }, ms);
-  streamReminderTimers.set(key, timer);
-}
-
-// =====================================================
 // COMMAND HANDLERS
 // =====================================================
 
-// /setup
+// /setup ──────────────────────────────────────────────
 async function handleSetup(interaction) {
   const guildId = interaction.guildId;
   const userId  = interaction.user.id;
+  const guild   = interaction.guild;
 
-  // Reply to the interaction immediately (Discord requires response within 3 seconds)
+  // Acknowledge immediately — DM creation can take >3 seconds
   await interaction.reply({ content: '📬 Check your DMs — setup wizard is waiting!', flags: 64 });
 
-  // Now open the DM (can take a moment, interaction already acknowledged)
   let dm;
   try {
     dm = await interaction.user.createDM();
   } catch {
     return interaction.followUp({
-      content: "❌ I couldn't open a DM with you. Please enable DMs from server members and try again.",
+      content: "❌ **Setup Failed — DMs Blocked**\nI couldn't send you a DM. To fix this:\n1. Right-click the server → **Privacy Settings**\n2. Enable **Direct Messages**\n3. Run `/setup` again",
       flags: 64,
     });
   }
 
   await dm.send("👋 **Dynasty Bot Setup Wizard**\nAnswer each question in this DM. You have 2 minutes per step.");
 
-  const guild = interaction.guild;
+  // ── Setup Helpers ─────────────────────────────────────────────────────────
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  const TIMEOUT_MSG = '⏰ Setup timed out. Run `/setup` in your server again to restart.';
 
-  // Free text question
   const ask = async (question) => {
     await dm.send(question);
     try {
       const col = await dm.awaitMessages({ filter: m => m.author.id === userId && !m.author.bot, max: 1, time: 120000, errors: ['time'] });
       return col.first().content.trim();
     } catch {
-      await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+      await dm.send(TIMEOUT_MSG);
       return null;
     }
   };
 
   const askWithDefault = async (question, defaultVal) => {
     const answer = await ask(question);
-    if (!answer) return null;
+    if (answer === null) return null;
     return answer.toLowerCase() === 'default' ? String(defaultVal) : answer;
   };
 
-  // Button picker — sends message with buttons, returns the customId of the clicked button
   const askButtons = async (question, buttons) => {
-    // buttons = [{ label, id, style? }]  style: Primary=1 Danger=4 Secondary=2
     const rows = [];
     for (let i = 0; i < buttons.length; i += 5) {
       rows.push(new ActionRowBuilder().addComponents(
@@ -493,27 +519,22 @@ async function handleSetup(interaction) {
     }
     const msg = await dm.send({ content: question, components: rows });
     try {
-      const btnInt = await msg.awaitMessageComponent({
-        filter: i => i.user.id === userId,
-        time: 120000,
-      });
-      await btnInt.update({ components: [] }); // remove buttons after click
+      const btnInt = await msg.awaitMessageComponent({ filter: i => i.user.id === userId, time: 120000 });
+      await btnInt.update({ components: [] });
       return btnInt.customId.replace('setup_', '');
     } catch {
-      await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+      await dm.send(TIMEOUT_MSG);
       return null;
     }
   };
 
-  // Multi-select buttons — keeps buttons active, toggling selection, until user clicks Done
   const askMultiButtons = async (question, options) => {
-    // options = [{ label, id }]
     const selected = new Set();
 
     const buildRows = () => {
-      const optRows = [];
+      const rows = [];
       for (let i = 0; i < options.length; i += 4) {
-        optRows.push(new ActionRowBuilder().addComponents(
+        rows.push(new ActionRowBuilder().addComponents(
           options.slice(i, i + 4).map(o =>
             new ButtonBuilder()
               .setCustomId(`msel_${o.id}`)
@@ -522,21 +543,17 @@ async function handleSetup(interaction) {
           )
         ));
       }
-      // All + Done row
-      optRows.push(new ActionRowBuilder().addComponents(
+      rows.push(new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('msel_ALL').setLabel('Select All').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('msel_DONE').setLabel('✔ Done').setStyle(ButtonStyle.Success),
       ));
-      return optRows;
+      return rows;
     };
 
     const msg = await dm.send({ content: question, components: buildRows() });
 
-    return new Promise(async (resolve) => {
-      const collector = msg.createMessageComponentCollector({
-        filter: i => i.user.id === userId,
-        time: 120000,
-      });
+    return new Promise((resolve) => {
+      const collector = msg.createMessageComponentCollector({ filter: i => i.user.id === userId, time: 120000 });
 
       collector.on('collect', async (btnInt) => {
         const id = btnInt.customId.replace('msel_', '');
@@ -548,31 +565,30 @@ async function handleSetup(interaction) {
           options.forEach(o => selected.add(o.id));
           await btnInt.update({ components: buildRows() });
         } else {
-          if (selected.has(id)) selected.delete(id); else selected.add(id);
+          selected.has(id) ? selected.delete(id) : selected.add(id);
           await btnInt.update({ components: buildRows() });
         }
       });
 
       collector.on('end', (_, reason) => {
         if (reason !== 'done') {
-          dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+          dm.send(TIMEOUT_MSG);
           resolve(null);
         }
       });
     });
   };
 
-  // Channel picker — sends numbered buttons (up to 5 per row), returns chosen channel object
-  const pickChannel = async (question, channels) => {
-    // Use buttons if <=25 channels, otherwise fall back to numbered list
-    if (channels.length <= 25) {
+  const pickFromList = async (question, items, idPrefix, labelFn) => {
+    if (items.length === 0) return null;
+    if (items.length <= 25) {
       const rows = [];
-      for (let i = 0; i < channels.length; i += 5) {
+      for (let i = 0; i < items.length; i += 5) {
         rows.push(new ActionRowBuilder().addComponents(
-          channels.slice(i, i + 5).map(c =>
+          items.slice(i, i + 5).map(item =>
             new ButtonBuilder()
-              .setCustomId(`ch_${c.id}`)
-              .setLabel('#' + c.name)
+              .setCustomId(`${idPrefix}_${item.id}`)
+              .setLabel(labelFn(item))
               .setStyle(ButtonStyle.Secondary)
           )
         ));
@@ -581,90 +597,52 @@ async function handleSetup(interaction) {
       try {
         const btnInt = await msg.awaitMessageComponent({ filter: i => i.user.id === userId, time: 120000 });
         await btnInt.update({ components: [] });
-        return channels.find(c => c.id === btnInt.customId.replace('ch_', ''));
+        return items.find(item => item.id === btnInt.customId.replace(`${idPrefix}_`, ''));
       } catch {
-        await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+        await dm.send(TIMEOUT_MSG);
         return null;
       }
     } else {
-      // Fallback: numbered text list
-      const lines = channels.map((c, i) => `\`${i + 1}\` — #${c.name}`).join('\n');
+      // Numbered text fallback for >25 items
+      const lines = items.map((item, i) => `\`${i + 1}\` — ${labelFn(item)}`).join('\n');
       await dm.send(`${question}\n\n${lines}`);
       try {
         const col = await dm.awaitMessages({ filter: m => m.author.id === userId && !m.author.bot, max: 1, time: 120000, errors: ['time'] });
         const idx = parseInt(col.first().content.trim()) - 1;
-        if (isNaN(idx) || idx < 0 || idx >= channels.length) {
+        if (isNaN(idx) || idx < 0 || idx >= items.length) {
           await dm.send('❌ Invalid selection. Run `/setup` again to restart.');
           return null;
         }
-        return channels[idx];
+        return items[idx];
       } catch {
-        await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
+        await dm.send(TIMEOUT_MSG);
         return null;
       }
     }
   };
 
-  // Role picker — same as pickChannel but for roles
-  const pickRole = async (question, roles) => {
-    if (roles.length <= 25) {
-      const rows = [];
-      for (let i = 0; i < roles.length; i += 5) {
-        rows.push(new ActionRowBuilder().addComponents(
-          roles.slice(i, i + 5).map(r =>
-            new ButtonBuilder()
-              .setCustomId(`role_${r.id}`)
-              .setLabel('@' + r.name)
-              .setStyle(ButtonStyle.Secondary)
-          )
-        ));
-      }
-      const msg = await dm.send({ content: question, components: rows });
-      try {
-        const btnInt = await msg.awaitMessageComponent({ filter: i => i.user.id === userId, time: 120000 });
-        await btnInt.update({ components: [] });
-        return roles.find(r => r.id === btnInt.customId.replace('role_', ''));
-      } catch {
-        await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
-        return null;
-      }
-    } else {
-      const lines = roles.map((r, i) => `\`${i + 1}\` — @${r.name}`).join('\n');
-      await dm.send(`${question}\n\n${lines}`);
-      try {
-        const col = await dm.awaitMessages({ filter: m => m.author.id === userId && !m.author.bot, max: 1, time: 120000, errors: ['time'] });
-        const idx = parseInt(col.first().content.trim()) - 1;
-        if (isNaN(idx) || idx < 0 || idx >= roles.length) {
-          await dm.send('❌ Invalid selection. Run `/setup` again to restart.');
-          return null;
-        }
-        return roles[idx];
-      } catch {
-        await dm.send('⏰ Setup timed out. Run `/setup` in your server again to restart.');
-        return null;
-      }
-    }
-  };
+  const pickChannel = (question, channels) => pickFromList(question, channels, 'ch', c => '#' + c.name);
+  const pickRole    = (question, roles)    => pickFromList(question, roles,    'role', r => '@' + r.name);
 
-  // Fetch channels and roles up front
-  const textChannels = guild.channels.cache
-    .filter(c => c.type === 0)
+  // ── Fetch guild resources ─────────────────────────────────────────────────
+  const textChannels = [...guild.channels.cache
+    .filter(c => c.type === ChannelType.GuildText)
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map(c => c);
+    .values()];
 
-  const roles = guild.roles.cache
+  const roles = [...guild.roles.cache
     .filter(r => !r.managed && r.name !== '@everyone')
     .sort((a, b) => b.position - a.position)
-    .map(r => r);
+    .values()];
 
-  // ── League info ───────────────────────────────────────────────────────────
+  // ── League Info ───────────────────────────────────────────────────────────
   const leagueName = await ask('**[League 1/2]** What is your league name?\nExample: CMR Dynasty');
   if (!leagueName) return;
 
   const leagueAbbr = await ask('**[League 2/2]** What is your league abbreviation or keyword?\nExample: CMR');
   if (!leagueAbbr) return;
 
-  // ── Feature selection (multi-select buttons) ──────────────────────────────
+  // ── Feature Selection ─────────────────────────────────────────────────────
   const featureOptions = [
     { label: 'Job Offers',       id: 'job_offers' },
     { label: 'Stream Reminders', id: 'stream_reminders' },
@@ -687,7 +665,7 @@ async function handleSetup(interaction) {
     feature_rankings:         selectedFeatures.includes('rankings'),
   };
 
-  // ── Channels — only ask for what the enabled features need ───────────────
+  // ── Channel Setup (only for enabled features) ─────────────────────────────
   const channelConfig = {
     channel_news_feed:       'news-feed',
     channel_signed_coaches:  'signed-coaches',
@@ -696,15 +674,13 @@ async function handleSetup(interaction) {
     channel_streaming:       'streaming',
   };
 
-  const needsNewsFeed    = features.feature_press_releases || features.feature_rankings;
-  const needsSigned      = features.feature_job_offers;
-  const needsTeamList    = features.feature_job_offers;
-  const needsAdvance     = features.feature_advance_system;
-  const needsStreaming   = features.feature_stream_reminders;
+  const needsNewsFeed  = features.feature_press_releases || features.feature_rankings;
+  const needsSigned    = features.feature_job_offers;
+  const needsTeamList  = features.feature_job_offers;
+  const needsAdvance   = features.feature_advance_system;
+  const needsStreaming = features.feature_stream_reminders;
 
-  const anyChannel = needsNewsFeed || needsSigned || needsTeamList || needsAdvance || needsStreaming;
-
-  if (anyChannel) {
+  if (needsNewsFeed || needsSigned || needsTeamList || needsAdvance || needsStreaming) {
     await dm.send('**— Channel Setup —**\nSelect the channel for each feature you enabled.');
 
     if (needsNewsFeed) {
@@ -712,25 +688,21 @@ async function handleSetup(interaction) {
       if (!ch) return;
       channelConfig.channel_news_feed = ch.name;
     }
-
     if (needsSigned) {
       const ch = await pickChannel('✍️ **Signed Coaches** — Where should coach signing announcements post?', textChannels);
       if (!ch) return;
       channelConfig.channel_signed_coaches = ch.name;
     }
-
     if (needsTeamList) {
       const ch = await pickChannel('📋 **Team Lists** — Where should the available teams list post?', textChannels);
       if (!ch) return;
       channelConfig.channel_team_lists = ch.name;
     }
-
     if (needsAdvance) {
       const ch = await pickChannel('⏱️ **Advance Tracker** — Where should advance deadline notices post?', textChannels);
       if (!ch) return;
       channelConfig.channel_advance_tracker = ch.name;
     }
-
     if (needsStreaming) {
       const ch = await pickChannel('🎮 **Streaming** — Which channel should the bot monitor for stream links?', textChannels);
       if (!ch) return;
@@ -738,7 +710,7 @@ async function handleSetup(interaction) {
     }
   }
 
-  // ── Head Coach Role ───────────────────────────────────────────────────────
+  // ── Role Setup ────────────────────────────────────────────────────────────
   let headCoachRoleName = 'head coach';
   let headCoachRoleId   = null;
 
@@ -751,7 +723,7 @@ async function handleSetup(interaction) {
     await dm.send('⚠️ No roles found. The bot will create a "head coach" role automatically when the first coach is assigned.');
   }
 
-  // ── Job Offers follow-up ──────────────────────────────────────────────────
+  // ── Job Offers Config ─────────────────────────────────────────────────────
   let jobOffersConfig = { star_rating_for_offers: 2.5, star_rating_max_for_offers: null, job_offers_count: 3, job_offers_expiry_hours: 24 };
 
   if (features.feature_job_offers) {
@@ -777,29 +749,29 @@ async function handleSetup(interaction) {
     };
   }
 
-  // ── Stream Reminders follow-up ────────────────────────────────────────────
+  // ── Stream Reminders Config ───────────────────────────────────────────────
   let streamConfig = { stream_reminder_minutes: 45 };
 
   if (features.feature_stream_reminders) {
-    const reminderMins = await askWithDefault(
+    const mins = await askWithDefault(
       '**— Stream Reminders Setup —**\nHow many minutes after a stream link is posted should the bot send a reminder?\nDefault: 45', '45'
     );
-    if (!reminderMins) return;
-    streamConfig = { stream_reminder_minutes: parseInt(reminderMins) || 45 };
+    if (!mins) return;
+    streamConfig = { stream_reminder_minutes: parseInt(mins) || 45 };
   }
 
-  // ── Advance System follow-up ──────────────────────────────────────────────
+  // ── Advance System Config ─────────────────────────────────────────────────
   let advanceConfig = { advance_intervals: '[24, 48]' };
 
   if (features.feature_advance_system) {
-    const advanceInput = await askWithDefault(
+    const intervals = await askWithDefault(
       '**— Advance System Setup —**\nWhat advance intervals (hours) should be available? Enter as a JSON array.\nExample: [24, 48] or [12, 24, 48]\nDefault: [24, 48]', '[24, 48]'
     );
-    if (!advanceInput) return;
-    advanceConfig = { advance_intervals: advanceInput };
+    if (!intervals) return;
+    advanceConfig = { advance_intervals: intervals };
   }
 
-  // ── Save ──────────────────────────────────────────────────────────────────
+  // ── Save Config ───────────────────────────────────────────────────────────
   try {
     await createDefaultConfig(guildId, leagueName);
     await saveConfig(guildId, {
@@ -814,37 +786,37 @@ async function handleSetup(interaction) {
       ...advanceConfig,
     });
 
+    // ── Summary Embed ─────────────────────────────────────────────────────
     const summaryFields = [
-      { name: 'League Name',    value: leagueName,  inline: true },
-      { name: 'Abbreviation',   value: leagueAbbr,  inline: true },
-      { name: '\u200b',         value: '\u200b',     inline: true },
-      { name: 'Job Offers',     value: features.feature_job_offers       ? '✅' : '❌', inline: true },
+      { name: 'League Name',      value: leagueName,  inline: true },
+      { name: 'Abbreviation',     value: leagueAbbr,  inline: true },
+      { name: '\u200b',           value: '\u200b',     inline: true },
+      { name: 'Job Offers',       value: features.feature_job_offers       ? '✅' : '❌', inline: true },
       { name: 'Stream Reminders', value: features.feature_stream_reminders ? '✅' : '❌', inline: true },
-      { name: 'Advance System', value: features.feature_advance_system   ? '✅' : '❌', inline: true },
-      { name: 'Press Releases', value: features.feature_press_releases   ? '✅' : '❌', inline: true },
-      { name: 'Rankings',       value: features.feature_rankings         ? '✅' : '❌', inline: true },
-      { name: '\u200b',         value: '\u200b',     inline: true },
+      { name: 'Advance System',   value: features.feature_advance_system   ? '✅' : '❌', inline: true },
+      { name: 'Press Releases',   value: features.feature_press_releases   ? '✅' : '❌', inline: true },
+      { name: 'Rankings',         value: features.feature_rankings         ? '✅' : '❌', inline: true },
+      { name: '\u200b',           value: '\u200b',     inline: true },
     ];
 
     if (needsNewsFeed)  summaryFields.push({ name: 'News Feed',       value: '#' + channelConfig.channel_news_feed,       inline: true });
     if (needsSigned)    summaryFields.push({ name: 'Signed Coaches',  value: '#' + channelConfig.channel_signed_coaches,  inline: true });
     if (needsTeamList)  summaryFields.push({ name: 'Team Lists',      value: '#' + channelConfig.channel_team_lists,      inline: true });
     if (needsAdvance)   summaryFields.push({ name: 'Advance Tracker', value: '#' + channelConfig.channel_advance_tracker, inline: true });
-    if (needsStreaming) summaryFields.push({ name: 'Streaming',       value: '#' + channelConfig.channel_streaming,       inline: true });
+    if (needsStreaming) summaryFields.push({ name: 'Streaming',        value: '#' + channelConfig.channel_streaming,       inline: true });
     summaryFields.push({ name: 'Head Coach Role', value: '@' + headCoachRoleName, inline: true });
     summaryFields.push({ name: '\u200b', value: '\u200b', inline: true });
 
     if (features.feature_job_offers) {
-      const maxStr = jobOffersConfig.star_rating_max_for_offers ? jobOffersConfig.star_rating_max_for_offers + ' stars' : 'No cap';
       summaryFields.push(
-        { name: 'Min Star Rating', value: jobOffersConfig.star_rating_for_offers + ' stars', inline: true },
-        { name: 'Max Star Rating', value: maxStr,                                             inline: true },
-        { name: 'Offers Per User', value: String(jobOffersConfig.job_offers_count),           inline: true },
-        { name: 'Offer Expiry',    value: jobOffersConfig.job_offers_expiry_hours + ' hrs',   inline: true },
+        { name: 'Min Star Rating', value: jobOffersConfig.star_rating_for_offers + ' stars',                                              inline: true },
+        { name: 'Max Star Rating', value: jobOffersConfig.star_rating_max_for_offers ? jobOffersConfig.star_rating_max_for_offers + ' stars' : 'No cap', inline: true },
+        { name: 'Offers Per User', value: String(jobOffersConfig.job_offers_count),                                                       inline: true },
+        { name: 'Offer Expiry',    value: jobOffersConfig.job_offers_expiry_hours + ' hrs',                                               inline: true },
       );
     }
-    if (features.feature_stream_reminders) summaryFields.push({ name: 'Stream Reminder',  value: streamConfig.stream_reminder_minutes + ' min', inline: true });
-    if (features.feature_advance_system)   summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals,              inline: true });
+    if (features.feature_stream_reminders) summaryFields.push({ name: 'Stream Reminder',  value: streamConfig.stream_reminder_minutes + ' min',  inline: true });
+    if (features.feature_advance_system)   summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals,                 inline: true });
 
     const embed = new EmbedBuilder()
       .setTitle('✅ Setup Complete!')
@@ -854,21 +826,22 @@ async function handleSetup(interaction) {
 
     await dm.send({ embeds: [embed] });
   } catch (err) {
+    console.error('[setup] Error saving config:', err);
     await dm.send(`❌ Setup failed: ${err.message}`);
   }
 }
 
-// /config view
+// /config view ────────────────────────────────────────
 async function handleConfigView(interaction) {
   const config = await getConfig(interaction.guildId);
   const embed = new EmbedBuilder()
     .setTitle(`⚙️ ${config.league_name} — Bot Configuration`)
     .setColor(config.embed_color_primary_int || 0x1e90ff)
     .addFields(
-      { name: '📌 League', value: config.league_name, inline: true },
+      { name: '📌 League',       value: config.league_name,                     inline: true },
       { name: '🔤 Abbreviation', value: config.league_abbreviation || 'Not set', inline: true },
-      { name: '🆔 Guild ID', value: config.guild_id, inline: true },
-      { name: '\u200b', value: '\u200b', inline: true },
+      { name: '🆔 Guild ID',     value: config.guild_id,                         inline: true },
+      { name: '\u200b',          value: '\u200b',                                 inline: true },
       { name: '🔧 Features', value:
         `Job Offers: ${config.feature_job_offers ? '✅' : '❌'}\n` +
         `Stream Reminders: ${config.feature_stream_reminders ? '✅' : '❌'}\n` +
@@ -895,80 +868,78 @@ async function handleConfigView(interaction) {
   await interaction.reply({ embeds: [embed], flags: 64 });
 }
 
-// /config features
+// /config features ────────────────────────────────────
 async function handleConfigFeatures(interaction) {
   const config = await getConfig(interaction.guildId);
-
   const row = new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(`features-toggle-${interaction.guildId}`)
       .setPlaceholder('Select features to toggle...')
       .setMinValues(0)
-      .setMaxValues(6)
+      .setMaxValues(5)
       .addOptions([
-        { label: 'Job Offers', value: 'feature_job_offers', description: 'Enable/disable job offer system', default: config.feature_job_offers },
-        { label: 'Stream Reminders', value: 'feature_stream_reminders', description: 'Enable/disable stream reminders', default: config.feature_stream_reminders },
-        { label: 'Advance System', value: 'feature_advance_system', description: 'Enable/disable advance system', default: config.feature_advance_system },
-        { label: 'Press Releases', value: 'feature_press_releases', description: 'Enable/disable press releases', default: config.feature_press_releases },
-        { label: 'Rankings', value: 'feature_rankings', description: 'Enable/disable rankings', default: config.feature_rankings },
+        { label: 'Job Offers',       value: 'feature_job_offers',       description: 'Enable/disable job offer system',    default: config.feature_job_offers },
+        { label: 'Stream Reminders', value: 'feature_stream_reminders', description: 'Enable/disable stream reminders',    default: config.feature_stream_reminders },
+        { label: 'Advance System',   value: 'feature_advance_system',   description: 'Enable/disable advance system',      default: config.feature_advance_system },
+        { label: 'Press Releases',   value: 'feature_press_releases',   description: 'Enable/disable press releases',      default: config.feature_press_releases },
+        { label: 'Rankings',         value: 'feature_rankings',         description: 'Enable/disable rankings',            default: config.feature_rankings },
       ])
   );
-
   await interaction.reply({
     content: '**Feature Toggles** — Select the features you want **ENABLED** (deselect to disable):',
     components: [row], flags: 64,
   });
 }
 
-// /config edit
+// /config edit ────────────────────────────────────────
 async function handleConfigEdit(interaction) {
   const setting = interaction.options.getString('setting');
   const value   = interaction.options.getString('value');
   const allowed = [
-    'league_name', 'league_abbreviation', 'channel_news_feed', 'channel_advance_tracker', 'channel_team_lists',
-    'channel_signed_coaches', 'channel_streaming', 'role_head_coach',
-    'star_rating_for_offers', 'star_rating_max_for_offers', 'job_offers_count', 'job_offers_expiry_hours', 'stream_reminder_minutes', 'advance_intervals',
+    'league_name', 'league_abbreviation', 'channel_news_feed', 'channel_advance_tracker',
+    'channel_team_lists', 'channel_signed_coaches', 'channel_streaming', 'role_head_coach',
+    'star_rating_for_offers', 'star_rating_max_for_offers', 'job_offers_count',
+    'job_offers_expiry_hours', 'stream_reminder_minutes', 'advance_intervals',
     'embed_color_primary', 'embed_color_win', 'embed_color_loss',
   ];
   if (!allowed.includes(setting)) {
-    return interaction.reply({ content: `❌ Unknown setting \`${setting}\`. Allowed: ${allowed.join(', ')}`, flags: 64 });
+    return interaction.reply({ content: `❌ **Unknown Setting: \`${setting}\`**\nUse the autocomplete dropdown when typing the setting name, or run \`/config view\` to see all available settings.`, flags: 64 });
   }
   try {
     await saveConfig(interaction.guildId, { [setting]: value });
     await interaction.reply({ content: `✅ Updated **${setting}** to \`${value}\``, flags: 64 });
   } catch (err) {
-    await interaction.reply({ content: `❌ Failed to update: ${err.message}`, flags: 64 });
+    await interaction.reply({ content: `❌ **Failed to Save Setting**\nDatabase error: ${err.message}\n\nTry running \`/config reload\` then attempt the edit again. If this keeps happening, check your Supabase connection.`, flags: 64 });
   }
 }
 
-// /config reload
+// /config reload ──────────────────────────────────────
 async function handleConfigReload(interaction) {
   guildConfigs.delete(interaction.guildId);
   const config = await loadGuildConfig(interaction.guildId);
   await interaction.reply({ content: `✅ Config reloaded for **${config.league_name}**!`, flags: 64 });
 }
 
-// /joboffers
+// /joboffers ──────────────────────────────────────────
 async function handleJobOffers(interaction) {
   const guildId = interaction.guildId;
   const userId  = interaction.user.id;
   const config  = await getConfig(guildId);
 
   if (!config.feature_job_offers) {
-    return interaction.reply({ content: '❌ Job offers are disabled in this server.', flags: 64 });
+    return interaction.reply({ content: '❌ **Job Offers Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 });
   }
 
-  // Block users who already have a team — job offers are for new coaches only
   const currentTeam = await getTeamByUser(userId, guildId);
   if (currentTeam) {
     return interaction.reply({
-      content: `❌ You already coach **${currentTeam.team_name}**. Job offers are only for coaches without a team.`, flags: 64,
+      content: `❌ **Already Assigned**\nYou are already the head coach of **${currentTeam.team_name}**. Job offers are only available to coaches without a team.\n\nIf this is a mistake, ask an admin to run \`/resetteam\` to remove your current assignment.`, flags: 64,
     });
   }
 
   const now = new Date();
 
-  // Check for existing active offers and resend them with buttons
+  // Check for existing active offers and resend
   const { data: existingOffers } = await supabase
     .from('job_offers')
     .select('*, teams(team_name, star_rating, conference)')
@@ -977,71 +948,50 @@ async function handleJobOffers(interaction) {
     .gt('expires_at', now.toISOString());
 
   if (existingOffers && existingOffers.length > 0) {
-    await sendOffersAsDM(interaction, existingOffers, config, guildId, true);
-    return;
+    return sendOffersAsDM(interaction, existingOffers, config, guildId, true);
   }
 
-  // Find teams available — not assigned in this guild, not locked in active offers
-  const { data: lockedTeamIds } = await supabase
-    .from('job_offers')
-    .select('team_id')
-    .eq('guild_id', guildId)
-    .gt('expires_at', now.toISOString());
-  const locked = (lockedTeamIds || []).map(r => r.team_id);
+  // Find locked (in other users' active offers) and already-assigned teams
+  const { data: lockedRows }    = await supabase.from('job_offers').select('team_id').eq('guild_id', guildId).gt('expires_at', now.toISOString());
+  const { data: assignedRows }  = await supabase.from('team_assignments').select('team_id').eq('guild_id', guildId);
 
-  const { data: assignedInGuild } = await supabase
-    .from('team_assignments')
-    .select('team_id')
-    .eq('guild_id', guildId);
-  const assignedIds = (assignedInGuild || []).map(a => a.team_id);
+  const locked    = (lockedRows    || []).map(r => r.team_id);
+  const assigned  = (assignedRows  || []).map(r => r.team_id);
 
-  let jobQuery = supabase
+  let query = supabase
     .from('teams')
     .select('*')
     .gte('star_rating', config.star_rating_for_offers)
     .order('star_rating', { ascending: false })
     .limit(50);
-  if (config.star_rating_max_for_offers) {
-    jobQuery = jobQuery.lte('star_rating', config.star_rating_max_for_offers);
-  }
-  const { data: availableJobs } = await jobQuery;
 
-  const pool = (availableJobs || []).filter(t =>
-    !assignedIds.includes(t.id) && !locked.includes(t.id)
-  );
+  if (config.star_rating_max_for_offers) {
+    query = query.lte('star_rating', config.star_rating_max_for_offers);
+  }
+
+  const { data: availableJobs } = await query;
+  const pool = (availableJobs || []).filter(t => !assigned.includes(t.id) && !locked.includes(t.id));
 
   if (pool.length === 0) {
     return interaction.reply({
-      content: `ℹ️ No available jobs meet the ${config.star_rating_for_offers}⭐ minimum right now. Try again later.`, flags: 64,
+      content: `❌ **No Available Teams**\nThere are no unassigned teams with a **${config.star_rating_for_offers}⭐ or higher** rating right now.\n\nPossible reasons:\n• All eligible teams are taken\n• All eligible teams are locked in active offers\n• The star rating range in config is too narrow\n\nAn admin can adjust the range with \`/config edit\`.`, flags: 64,
     });
   }
 
-  // Shuffle and pick N offers
-  const picks = pool.sort(() => Math.random() - 0.5).slice(0, config.job_offers_count);
-
-  // Lock them in the job_offers table
-  const expiryHours = config.job_offers_expiry_hours || 48;
-  const expiresAt   = new Date(now.getTime() + expiryHours * 60 * 60 * 1000);
+  const picks      = pool.sort(() => Math.random() - 0.5).slice(0, config.job_offers_count);
+  const expiresAt  = new Date(now.getTime() + (config.job_offers_expiry_hours || 48) * 60 * 60 * 1000);
 
   await supabase.from('job_offers').insert(
-    picks.map(t => ({
-      guild_id:   guildId,
-      user_id:    userId,
-      team_id:    t.id,
-      expires_at: expiresAt.toISOString(),
-    }))
+    picks.map(t => ({ guild_id: guildId, user_id: userId, team_id: t.id, expires_at: expiresAt.toISOString() }))
   );
 
-  // Format as {teams: {...}} to match existing offer shape
   const shaped = picks.map(t => ({ teams: t, expires_at: expiresAt.toISOString(), team_id: t.id }));
   await sendOffersAsDM(interaction, shaped, config, guildId, false);
 }
 
-// Sends offers to DM with an Accept button per offer
 async function sendOffersAsDM(interaction, offers, config, guildId, isExisting) {
-  const expiresAt  = new Date(offers[0].expires_at);
-  const now        = new Date();
-  const hoursLeft  = Math.ceil((expiresAt - now) / (1000 * 60 * 60));
+  const expiresAt = new Date(offers[0].expires_at);
+  const hoursLeft = Math.ceil((expiresAt - new Date()) / (1000 * 60 * 60));
 
   const embed = new EmbedBuilder()
     .setTitle('📋 Your Job Offers')
@@ -1051,27 +1001,23 @@ async function sendOffersAsDM(interaction, offers, config, guildId, isExisting) 
         ? `You already have active offers. They expire in **${hoursLeft} hour(s)**. Click a button below to accept one.`
         : `Here are your **${offers.length}** offer(s). They expire in **${hoursLeft} hours**. Click a button below to accept one.`
     )
-    .addFields(
-      offers.map((o, i) => ({
-        name: `${i + 1}. ${o.teams.team_name}`,
-        value: `Rating: ${starRating(o.teams.star_rating || 0)} (${o.teams.star_rating || '?'}⭐)\nConference: ${o.teams.conference || 'Unknown'}`,
-        inline: false,
-      }))
-    )
+    .addFields(offers.map((o, i) => ({
+      name:  `${i + 1}. ${o.teams.team_name}`,
+      value: `Rating: ${starRating(o.teams.star_rating || 0)} (${o.teams.star_rating || '?'}⭐)\nConference: ${o.teams.conference || 'Unknown'}`,
+      inline: false,
+    })))
     .setFooter({ text: 'Offers cannot be refreshed until they expire.' });
 
-  // One Accept button per offer
   const rows = [];
   for (let i = 0; i < offers.length; i += 5) {
-    const row = new ActionRowBuilder().addComponents(
+    rows.push(new ActionRowBuilder().addComponents(
       offers.slice(i, i + 5).map((o, j) =>
         new ButtonBuilder()
           .setCustomId(`accept-offer_${guildId}_${offers[i + j].team_id}`)
           .setLabel(`Accept: ${o.teams.team_name}`)
           .setStyle(ButtonStyle.Primary)
       )
-    );
-    rows.push(row);
+    ));
   }
 
   try {
@@ -1083,17 +1029,13 @@ async function sendOffersAsDM(interaction, offers, config, guildId, isExisting) 
   }
 }
 
-// Handle Accept button clicks
 async function handleAcceptOffer(interaction) {
-  // customId format: accept-offer_guildId_teamId
-  const parts   = interaction.customId.split('_');
-  const guildId = parts[1];
-  const teamId  = parseInt(parts[2]);
-  const userId  = interaction.user.id;
+  const [, guildId, teamIdStr] = interaction.customId.split('_');
+  const teamId = parseInt(teamIdStr);
+  const userId = interaction.user.id;
 
   await interaction.deferUpdate();
 
-  // Verify the offer still exists and belongs to this user
   const { data: offer } = await supabase
     .from('job_offers')
     .select('*, teams(*)')
@@ -1104,15 +1046,9 @@ async function handleAcceptOffer(interaction) {
     .single();
 
   if (!offer) {
-    await interaction.editReply({
-      content: '❌ This offer is no longer available — it may have expired or already been taken.',
-      components: [],
-      embeds: [],
-    });
-    return;
+    return interaction.editReply({ content: '❌ **Offer No Longer Available**\nThis offer has either expired or the team was taken by someone else.\n\nRun `/joboffers` in your server to request a fresh set of offers.', components: [], embeds: [] });
   }
 
-  // Double-check team isn't already assigned in this guild
   const { data: existing } = await supabase
     .from('team_assignments')
     .select('user_id')
@@ -1121,52 +1057,36 @@ async function handleAcceptOffer(interaction) {
     .single();
 
   if (existing) {
-    await interaction.editReply({
-      content: `❌ **${offer.teams.team_name}** was just taken by someone else. Run \`/joboffers\` again for a new set.`,
-      components: [],
-      embeds: [],
-    });
-    return;
+    return interaction.editReply({ content: `❌ **Team Just Taken**\n**${offer.teams.team_name}** was claimed by another coach moments before you accepted.\n\nRun \`/joboffers\` in your server to get a new set of offers.`, components: [], embeds: [] });
   }
 
-  // Assign the team
   await assignTeam(teamId, userId, guildId);
+  await supabase.from('job_offers').delete().eq('guild_id', guildId).eq('user_id', userId);
 
-  // Delete ALL of this user's offers for this guild — they have a team now
-  await supabase
-    .from('job_offers')
-    .delete()
-    .eq('guild_id', guildId)
-    .eq('user_id', userId);
-
-  // Assign head coach role in the guild
   const config = await getConfig(guildId);
   const guild  = client.guilds.cache.get(guildId);
+
   if (guild) {
     const member = await guild.members.fetch(userId).catch(() => null);
     if (member) {
       const hcRole = await findOrCreateRole(guild, config.role_head_coach);
       await member.roles.add(hcRole).catch(() => {});
-      if (!config.role_head_coach_id) {
-        await saveConfig(guildId, { role_head_coach_id: hcRole.id });
-      }
+      if (!config.role_head_coach_id) await saveConfig(guildId, { role_head_coach_id: hcRole.id });
     }
   }
 
-  // Update the DM to show acceptance
   const successEmbed = new EmbedBuilder()
     .setTitle('✅ Offer Accepted!')
     .setColor(0x00ff00)
     .setDescription(`You are now the Head Coach of **${offer.teams.team_name}**! Welcome to the league.`)
     .addFields(
-      { name: 'Team',       value: offer.teams.team_name,              inline: true },
-      { name: 'Conference', value: offer.teams.conference || 'Unknown', inline: true },
+      { name: 'Team',       value: offer.teams.team_name,               inline: true },
+      { name: 'Conference', value: offer.teams.conference || 'Unknown',  inline: true },
       { name: 'Rating',     value: `${starRating(offer.teams.star_rating || 0)} (${offer.teams.star_rating || '?'}⭐)`, inline: true },
     );
 
   await interaction.editReply({ embeds: [successEmbed], components: [] });
 
-  // Post signing announcement to the guild
   if (guild) {
     const signingEmbed = new EmbedBuilder()
       .setTitle(`✍️ Coach Signed — ${offer.teams.team_name}`)
@@ -1179,25 +1099,16 @@ async function handleAcceptOffer(interaction) {
       )
       .setTimestamp();
 
-    const signedChannel = findTextChannel(guild, config.channel_signed_coaches);
-    const newsChannel   = findTextChannel(guild, config.channel_news_feed);
-    const target        = signedChannel || newsChannel;
+    const target = findTextChannel(guild, config.channel_signed_coaches) || findTextChannel(guild, config.channel_news_feed);
     if (target) await target.send({ embeds: [signingEmbed] });
   }
 }
 
-// Expire job offers — runs on an interval, notifies users and releases teams back to pool
 async function expireJobOffers() {
   const now = new Date().toISOString();
-
-  const { data: expired } = await supabase
-    .from('job_offers')
-    .select('*, teams(team_name)')
-    .lt('expires_at', now);
-
+  const { data: expired } = await supabase.from('job_offers').select('*, teams(team_name)').lt('expires_at', now);
   if (!expired || expired.length === 0) return;
 
-  // Group by user+guild so we send one message per user
   const byUser = {};
   for (const offer of expired) {
     const key = `${offer.guild_id}:${offer.user_id}`;
@@ -1205,10 +1116,9 @@ async function expireJobOffers() {
     byUser[key].teams.push(offer.teams?.team_name || 'Unknown');
   }
 
-  // Notify each user
   for (const { guild_id, user_id, teams } of Object.values(byUser)) {
     try {
-      const guild = client.guilds.cache.get(guild_id);
+      const guild  = client.guilds.cache.get(guild_id);
       if (!guild) continue;
       const config = await getConfig(guild_id);
       const member = await guild.members.fetch(user_id).catch(() => null);
@@ -1224,24 +1134,20 @@ async function expireJobOffers() {
         );
 
       await member.send({ embeds: [embed] }).catch(() => {
-        // DMs disabled — try posting in news channel
         const newsChannel = findTextChannel(guild, config.channel_news_feed);
-        if (newsChannel) {
-          newsChannel.send({ content: `<@${user_id}>`, embeds: [embed] });
-        }
+        if (newsChannel) newsChannel.send({ content: `<@${user_id}>`, embeds: [embed] });
       });
     } catch (err) {
-      console.error('[expireJobOffers] Error notifying user:', err.message);
+      console.error('[expireJobOffers] Error:', err.message);
     }
   }
 
-  // Delete all expired rows
   await supabase.from('job_offers').delete().lt('expires_at', now);
-  console.log(`[expireJobOffers] Cleaned up ${expired.length} expired offer(s).`);
+  console.log(`[expireJobOffers] Removed ${expired.length} expired offer(s).`);
 }
 
-// /game-result
-async function handleGameResult(interaction, adminOverride = false) {
+// /game-result ────────────────────────────────────────
+async function handleGameResult(interaction) {
   const guildId      = interaction.guildId;
   const config       = await getConfig(guildId);
   const meta         = await getMeta(guildId);
@@ -1250,72 +1156,62 @@ async function handleGameResult(interaction, adminOverride = false) {
   const oppScore     = interaction.options.getInteger('opponent-score');
   const userId       = interaction.user.id;
 
-  let yourTeam = await getTeamByUser(userId, guildId);
+  const yourTeam = await getTeamByUser(userId, guildId);
   if (!yourTeam) {
-    return interaction.reply({ content: '❌ You don\'t have a team assigned.', flags: 64 });
+    return interaction.reply({ content: "❌ **No Team Assigned**\nYou don't have a team yet. Use `/joboffers` to receive coaching offers, or ask an admin to assign you a team with `/assign-team`.", flags: 64 });
   }
 
   const oppTeam = await getTeamByName(opponentName, guildId);
   if (!oppTeam) {
-    return interaction.reply({ content: `❌ Team \`${opponentName}\` not found.`, flags: 64 });
+    return interaction.reply({ content: `❌ **Opponent Not Found: \`${opponentName}\`**\nNo team with that name exists in the database. Make sure you selected from the autocomplete dropdown — partial or misspelled names won't match.`, flags: 64 });
   }
 
   const won  = yourScore > oppScore;
   const tied = yourScore === oppScore;
 
-  // Update records
   const yourRecord = await getRecord(yourTeam.id, meta.season, guildId);
-  const oppRecord  = await getRecord(oppTeam.id, meta.season, guildId);
+  const oppRecord  = await getRecord(oppTeam.id,  meta.season, guildId);
 
   if (won) {
-    yourRecord.wins   = (yourRecord.wins || 0) + 1;
-    oppRecord.losses  = (oppRecord.losses || 0) + 1;
+    yourRecord.wins++;  oppRecord.losses++;
   } else if (!tied) {
-    yourRecord.losses = (yourRecord.losses || 0) + 1;
-    oppRecord.wins    = (oppRecord.wins || 0) + 1;
+    yourRecord.losses++; oppRecord.wins++;
   }
 
   await upsertRecord({ ...yourRecord, team_id: yourTeam.id, season: meta.season, guild_id: guildId });
   await upsertRecord({ ...oppRecord,  team_id: oppTeam.id,  season: meta.season, guild_id: guildId });
 
-  // Save result
   await supabase.from('results').insert({
-    guild_id: guildId,
-    season: meta.season,
-    week: meta.week,
-    team1_id: yourTeam.id,
-    team2_id: oppTeam.id,
-    score1: yourScore,
-    score2: oppScore,
-    submitted_by: userId,
+    guild_id: guildId, season: meta.season, week: meta.week,
+    team1_id: yourTeam.id, team2_id: oppTeam.id,
+    score1: yourScore, score2: oppScore, submitted_by: userId,
   });
 
-  const color = tied ? 0xffa500 : (won ? config.embed_color_win_int : config.embed_color_loss_int);
   const result = tied ? 'TIE' : (won ? 'WIN' : 'LOSS');
+  const color  = tied ? 0xffa500 : (won ? config.embed_color_win_int : config.embed_color_loss_int);
 
   const embed = new EmbedBuilder()
     .setTitle(`🏈 Game Result — Season ${meta.season} Week ${meta.week}`)
     .setColor(color)
     .setDescription(`**${yourTeam.team_name}** vs **${oppTeam.team_name}**`)
     .addFields(
-      { name: yourTeam.team_name, value: `${yourScore}`, inline: true },
-      { name: result, value: '—', inline: true },
-      { name: oppTeam.team_name, value: `${oppScore}`, inline: true },
+      { name: yourTeam.team_name,           value: `${yourScore}`,                         inline: true },
+      { name: result,                        value: '—',                                    inline: true },
+      { name: oppTeam.team_name,            value: `${oppScore}`,                          inline: true },
       { name: `${yourTeam.team_name} Record`, value: `${yourRecord.wins}-${yourRecord.losses}`, inline: true },
-      { name: `${oppTeam.team_name} Record`, value: `${oppRecord.wins}-${oppRecord.losses}`, inline: true },
+      { name: `${oppTeam.team_name} Record`,  value: `${oppRecord.wins}-${oppRecord.losses}`,   inline: true },
     )
     .setFooter({ text: `Submitted by ${interaction.user.displayName}` });
 
   await interaction.reply({ embeds: [embed] });
 
-  // Post to news feed
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
   if (newsChannel && newsChannel.id !== interaction.channelId) {
     await newsChannel.send({ embeds: [embed] });
   }
 }
 
-// /any-game-result (admin)
+// /any-game-result ────────────────────────────────────
 async function handleAnyGameResult(interaction) {
   const guildId   = interaction.guildId;
   const config    = await getConfig(guildId);
@@ -1328,32 +1224,22 @@ async function handleAnyGameResult(interaction) {
   const team1 = await getTeamByName(team1Name, guildId);
   const team2 = await getTeamByName(team2Name, guildId);
 
-  if (!team1) return interaction.reply({ content: `❌ Team \`${team1Name}\` not found.`, flags: 64 });
-  if (!team2) return interaction.reply({ content: `❌ Team \`${team2Name}\` not found.`, flags: 64 });
+  if (!team1) return interaction.reply({ content: `❌ **Team Not Found: \`${team1Name}\`**\nNo team with that name exists in the database. Use the autocomplete dropdown to select teams.`, flags: 64 });
+  if (!team2) return interaction.reply({ content: `❌ **Team Not Found: \`${team2Name}\`**\nNo team with that name exists in the database. Use the autocomplete dropdown to select teams.`, flags: 64 });
 
   const record1 = await getRecord(team1.id, meta.season, guildId);
   const record2 = await getRecord(team2.id, meta.season, guildId);
 
-  if (score1 > score2) {
-    record1.wins = (record1.wins || 0) + 1;
-    record2.losses = (record2.losses || 0) + 1;
-  } else if (score2 > score1) {
-    record2.wins = (record2.wins || 0) + 1;
-    record1.losses = (record1.losses || 0) + 1;
-  }
+  if      (score1 > score2) { record1.wins++;  record2.losses++; }
+  else if (score2 > score1) { record2.wins++;  record1.losses++; }
 
   await upsertRecord({ ...record1, team_id: team1.id, season: meta.season, guild_id: guildId });
   await upsertRecord({ ...record2, team_id: team2.id, season: meta.season, guild_id: guildId });
 
   await supabase.from('results').insert({
-    guild_id: guildId,
-    season: meta.season,
-    week: meta.week,
-    team1_id: team1.id,
-    team2_id: team2.id,
-    score1,
-    score2,
-    submitted_by: interaction.user.id,
+    guild_id: guildId, season: meta.season, week: meta.week,
+    team1_id: team1.id, team2_id: team2.id,
+    score1, score2, submitted_by: interaction.user.id,
   });
 
   const won1  = score1 > score2;
@@ -1364,11 +1250,11 @@ async function handleAnyGameResult(interaction) {
     .setTitle(`🏈 Game Result Entered — S${meta.season} W${meta.week}`)
     .setColor(color)
     .addFields(
-      { name: team1.team_name, value: `${score1}`, inline: true },
-      { name: tied ? 'TIE' : (won1 ? 'WIN' : 'LOSS'), value: '—', inline: true },
-      { name: team2.team_name, value: `${score2}`, inline: true },
-      { name: `${team1.team_name} Record`, value: `${record1.wins}-${record1.losses}`, inline: true },
-      { name: `${team2.team_name} Record`, value: `${record2.wins}-${record2.losses}`, inline: true },
+      { name: team1.team_name,              value: `${score1}`,                        inline: true },
+      { name: tied ? 'TIE' : (won1 ? 'WIN' : 'LOSS'), value: '—',                     inline: true },
+      { name: team2.team_name,              value: `${score2}`,                        inline: true },
+      { name: `${team1.team_name} Record`,  value: `${record1.wins}-${record1.losses}`, inline: true },
+      { name: `${team2.team_name} Record`,  value: `${record2.wins}-${record2.losses}`, inline: true },
     )
     .setFooter({ text: `Entered by ${interaction.user.displayName} (admin)` });
 
@@ -1380,16 +1266,21 @@ async function handleAnyGameResult(interaction) {
   }
 }
 
-// /press-release
+// /press-release ──────────────────────────────────────
 async function handlePressRelease(interaction) {
   const config = await getConfig(interaction.guildId);
   if (!config.feature_press_releases) {
-    return interaction.reply({ content: '❌ Press releases are disabled in this server.', flags: 64 });
+    return interaction.reply({ content: '❌ **Press Releases Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 });
   }
 
-  const message   = interaction.options.getString('message');
-  const userTeam  = await getTeamByUser(interaction.user.id, interaction.guildId);
-  const teamName  = userTeam ? userTeam.team_name : interaction.user.displayName;
+  const message  = interaction.options.getString('message');
+  const userTeam = await getTeamByUser(interaction.user.id, interaction.guildId);
+  const teamName = userTeam ? userTeam.team_name : interaction.user.displayName;
+
+  const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
+  if (!newsChannel) {
+    return interaction.reply({ content: `❌ **News Feed Channel Not Found**\nThe configured channel \`#${config.channel_news_feed}\` doesn't exist in this server.\n\nAn admin can fix this with \`/config edit\` → **News Feed Channel**, or run \`/checkpermissions\` to audit all channels.`, flags: 64 });
+  }
 
   const embed = new EmbedBuilder()
     .setTitle(`📰 Press Release — ${teamName}`)
@@ -1398,45 +1289,35 @@ async function handlePressRelease(interaction) {
     .setFooter({ text: `Posted by ${interaction.user.displayName}` })
     .setTimestamp();
 
-  const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
-  if (!newsChannel) {
-    return interaction.reply({ content: `❌ News feed channel \`${config.channel_news_feed}\` not found.`, flags: 64 });
-  }
-
   await newsChannel.send({ embeds: [embed] });
   await supabase.from('news_feed').insert({
-    guild_id: interaction.guildId,
-    author_id: interaction.user.id,
-    team_name: teamName,
-    message,
+    guild_id: interaction.guildId, author_id: interaction.user.id, team_name: teamName, message,
   });
-
   await interaction.reply({ content: '✅ Press release posted!', flags: 64 });
 }
 
-// /ranking
+// /ranking ────────────────────────────────────────────
 async function handleRanking(interaction) {
   const config = await getConfig(interaction.guildId);
   if (!config.feature_rankings) {
-    return interaction.reply({ content: '❌ Rankings are disabled in this server.', flags: 64 });
+    return interaction.reply({ content: '❌ **Rankings Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 });
   }
 
   const meta = await getMeta(interaction.guildId);
   const { data: records } = await supabase
     .from('records')
-    .select('*, teams(team_name, user_id)')
+    .select('*, teams(team_name)')
     .eq('guild_id', interaction.guildId)
     .eq('season', meta.season)
     .order('wins', { ascending: false });
 
   if (!records || records.length === 0) {
-    return interaction.reply({ content: 'No records found for this season.', flags: 64 });
+    return interaction.reply({ content: '❌ **No Records Yet**\nNo game results have been submitted for this season. Records will appear here once coaches start submitting results with `/game-result`.', flags: 64 });
   }
 
-  const lines = records.map((r, i) => {
-    const name = r.teams?.team_name || `Team ${r.team_id}`;
-    return `**${i + 1}.** ${name} — ${r.wins}W - ${r.losses}L`;
-  });
+  const lines = records.map((r, i) =>
+    `**${i + 1}.** ${r.teams?.team_name || `Team ${r.team_id}`} — ${r.wins}W - ${r.losses}L`
+  );
 
   const embed = new EmbedBuilder()
     .setTitle(`🏆 Season ${meta.season} Standings`)
@@ -1447,7 +1328,7 @@ async function handleRanking(interaction) {
   await interaction.reply({ embeds: [embed] });
 }
 
-// /ranking-all-time
+// /ranking-all-time ───────────────────────────────────
 async function handleRankingAllTime(interaction) {
   const config = await getConfig(interaction.guildId);
 
@@ -1460,7 +1341,6 @@ async function handleRankingAllTime(interaction) {
     return interaction.reply({ content: 'No records found.', flags: 64 });
   }
 
-  // Aggregate by team
   const totals = {};
   for (const r of records) {
     const name = r.teams?.team_name || r.team_id;
@@ -1469,18 +1349,16 @@ async function handleRankingAllTime(interaction) {
     totals[name].losses += r.losses || 0;
   }
 
-  const sorted = Object.entries(totals)
-    .sort((a, b) => b[1].wins - a[1].wins);
-
-  const lines = sorted.map(([name, rec], i) => {
-    const pct = (rec.wins + rec.losses) > 0
-      ? ((rec.wins / (rec.wins + rec.losses)) * 100).toFixed(1)
-      : '0.0';
-    return `**${i + 1}.** ${name} — ${rec.wins}W - ${rec.losses}L (${pct}%)`;
-  });
+  const lines = Object.entries(totals)
+    .sort((a, b) => b[1].wins - a[1].wins)
+    .map(([name, rec], i) => {
+      const pct = (rec.wins + rec.losses) > 0
+        ? ((rec.wins / (rec.wins + rec.losses)) * 100).toFixed(1) : '0.0';
+      return `**${i + 1}.** ${name} — ${rec.wins}W - ${rec.losses}L (${pct}%)`;
+    });
 
   const embed = new EmbedBuilder()
-    .setTitle(`🏆 All-Time Rankings`)
+    .setTitle('🏆 All-Time Rankings')
     .setColor(config.embed_color_primary_int)
     .setDescription(lines.join('\n'))
     .setTimestamp();
@@ -1488,7 +1366,7 @@ async function handleRankingAllTime(interaction) {
   await interaction.reply({ embeds: [embed] });
 }
 
-// /assign-team
+// /assign-team ────────────────────────────────────────
 async function handleAssignTeam(interaction) {
   const guildId  = interaction.guildId;
   const config   = await getConfig(guildId);
@@ -1497,41 +1375,26 @@ async function handleAssignTeam(interaction) {
   const teamName = interaction.options.getString('team');
   const skipAnn  = interaction.options.getBoolean('skip-announcement') || false;
 
-  await interaction.deferReply({ ephemeral: false });
+  await interaction.deferReply();
 
-  // Check team exists
   const team = await getTeamByName(teamName, guildId);
-  if (!team) {
-    return interaction.editReply(`❌ Team \`${teamName}\` not found. Make sure it's in the database.`);
-  }
+  if (!team) return interaction.editReply(`❌ **Team Not Found: \`${teamName}\`**\nThis team doesn't exist in the global teams database. Make sure you selected from the autocomplete dropdown.\n\nIf the team is missing entirely, it may need to be added to the Supabase \`teams\` table.`);
 
-  // Check if already taken in this guild
   if (team.user_id && team.user_id !== user.id) {
     const currentCoach = await guild.members.fetch(team.user_id).catch(() => null);
-    const coachName = currentCoach ? currentCoach.displayName : 'someone';
-    return interaction.editReply(`❌ **${team.team_name}** is already assigned to ${coachName} in this league.`);
+    return interaction.editReply(`❌ **Team Already Assigned**\n**${team.team_name}** is currently coached by **${currentCoach ? currentCoach.displayName : 'another coach'}** in this league.\n\nTo reassign this team, first run \`/resetteam\` on the current coach, then try \`/assign-team\` again.`);
   }
 
-  // Unassign old team if user has one in this guild
   const oldTeam = await getTeamByUser(user.id, guildId);
-  if (oldTeam) {
-    await unassignTeam(oldTeam.id, guildId);
-  }
+  if (oldTeam) await unassignTeam(oldTeam.id, guildId);
 
-  // Assign team in this guild
   await assignTeam(team.id, user.id, guildId);
 
-  // Assign head coach role
   const member = await guild.members.fetch(user.id).catch(() => null);
   if (member) {
     const hcRole = await findOrCreateRole(guild, config.role_head_coach);
-    if (!member.roles.cache.has(hcRole.id)) {
-      await member.roles.add(hcRole);
-    }
-    // Save role ID to config if not already saved
-    if (!config.role_head_coach_id) {
-      await saveConfig(guildId, { role_head_coach_id: hcRole.id });
-    }
+    if (!member.roles.cache.has(hcRole.id)) await member.roles.add(hcRole);
+    if (!config.role_head_coach_id) await saveConfig(guildId, { role_head_coach_id: hcRole.id });
   }
 
   const embed = new EmbedBuilder()
@@ -1540,24 +1403,19 @@ async function handleAssignTeam(interaction) {
     .setDescription(`<@${user.id}> has been assigned to **${team.team_name}**!`)
     .addFields(
       { name: 'Coach', value: `<@${user.id}>`, inline: true },
-      { name: 'Team', value: team.team_name, inline: true },
+      { name: 'Team',  value: team.team_name,  inline: true },
     )
     .setTimestamp();
-
 
   await interaction.editReply({ embeds: [embed] });
 
   if (!skipAnn) {
-    const signedChannel = findTextChannel(guild, config.channel_signed_coaches);
-    const newsChannel   = findTextChannel(guild, config.channel_news_feed);
-    const target        = signedChannel || newsChannel;
-    if (target && target.id !== interaction.channelId) {
-      await target.send({ embeds: [embed] });
-    }
+    const target = findTextChannel(guild, config.channel_signed_coaches) || findTextChannel(guild, config.channel_news_feed);
+    if (target && target.id !== interaction.channelId) await target.send({ embeds: [embed] });
   }
 }
 
-// /resetteam
+// /resetteam ──────────────────────────────────────────
 async function handleResetTeam(interaction) {
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
@@ -1565,12 +1423,11 @@ async function handleResetTeam(interaction) {
 
   const team = await getTeamByUser(user.id, guildId);
   if (!team) {
-    return interaction.reply({ content: `❌ <@${user.id}> doesn't have a team assigned.`, flags: 64 });
+    return interaction.reply({ content: `❌ **No Team Found**\n<@${user.id}> doesn't have a team assigned in this league. Nothing to reset.`, flags: 64 });
   }
 
   await unassignTeam(team.id, guildId);
 
-  // Remove head coach role
   const member = await interaction.guild.members.fetch(user.id).catch(() => null);
   if (member && config.role_head_coach_id) {
     await member.roles.remove(config.role_head_coach_id).catch(() => {});
@@ -1579,7 +1436,7 @@ async function handleResetTeam(interaction) {
   await interaction.reply({ content: `✅ <@${user.id}> has been removed from **${team.team_name}**.` });
 }
 
-// /listteams
+// /listteams ──────────────────────────────────────────
 async function handleListTeams(interaction) {
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
@@ -1587,15 +1444,11 @@ async function handleListTeams(interaction) {
 
   const allTeams = await getAllTeams(guildId);
 
-  // Filter to only teams within the configured star rating range
-  const minRating = config.star_rating_for_offers || 0;
+  const minRating = config.star_rating_for_offers     || 0;
   const maxRating = config.star_rating_max_for_offers || 999;
-  const teams = allTeams.filter(t => {
-    const r = parseFloat(t.star_rating) || 0;
-    // Always include taken teams regardless of rating so coaches show on the list
-    if (t.user_id) return true;
-    return r >= minRating && r <= maxRating;
-  });
+
+  // Always show taken teams; only show available teams within the configured range
+  const teams = allTeams.filter(t => t.user_id || (parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating));
 
   // Group by conference
   const confMap = {};
@@ -1605,123 +1458,98 @@ async function handleListTeams(interaction) {
     confMap[conf].push(t);
   }
 
-  // Build embeds — one per conference group, split if too long
-  const embeds = [];
   const fields = [];
-
   for (const [conf, confTeams] of Object.entries(confMap).sort()) {
     const lines = confTeams
       .sort((a, b) => (b.star_rating || 0) - (a.star_rating || 0))
-      .map(t => {
-        if (t.user_id) {
-          return `🏈 **${t.team_name}** — <@${t.user_id}> (${t.star_rating || '?'}⭐)`;
-        }
-        return `🟢 **${t.team_name}** — Available (${t.star_rating || '?'}⭐)`;
-      });
+      .map(t => t.user_id
+        ? `🏈 **${t.team_name}** — <@${t.user_id}> (${t.star_rating || '?'}⭐)`
+        : `🟢 **${t.team_name}** — Available (${t.star_rating || '?'}⭐)`
+      );
 
-    // Split conference into chunks of 15 to stay under 1024 chars
     for (let i = 0; i < lines.length; i += 15) {
-      const chunk = lines.slice(i, i + 15);
       fields.push({
-        name: i === 0 ? `__${conf}__` : `__${conf} (cont.)__`,
-        value: chunk.join('\n'),
+        name:  i === 0 ? `__${conf}__` : `__${conf} (cont.)__`,
+        value: lines.slice(i, i + 15).join('\n'),
         inline: false,
       });
     }
   }
 
-  // Discord allows max 25 fields per embed — split into multiple embeds if needed
-  const chunkSize = 25;
-  for (let i = 0; i < fields.length; i += chunkSize) {
-    const embed = new EmbedBuilder()
-      .setColor(config.embed_color_primary_int)
-      .addFields(fields.slice(i, i + chunkSize));
-
-    if (i === 0) {
-      const taken = teams.filter(t => t.user_id).length;
-      const avail = teams.filter(t => !t.user_id).length;
-      embed
-        .setTitle(`📋 ${config.league_name} — Team List`)
-        .setDescription(`**${taken}** coaches signed · **${avail}** teams available\nShowing teams rated **${minRating}⭐${maxRating < 999 ? ' – ' + maxRating + '⭐' : '+'}**`)
-        .setTimestamp();
-    }
-
-    embeds.push(embed);
-  }
-
-  if (embeds.length === 0) {
+  if (fields.length === 0) {
     return interaction.editReply('No teams found. Make sure teams are loaded in the database.');
   }
 
-  // Find the team-lists channel and clean old bot messages before posting
-  const listsChannel = findTextChannel(interaction.guild, config.channel_team_lists);
-  const target = listsChannel || interaction.channel;
+  const taken = teams.filter(t => t.user_id).length;
+  const avail = teams.filter(t => !t.user_id).length;
 
-  // Check bot has permission to send messages in the target channel
-  const botMember = interaction.guild.members.cache.get(client.user.id);
-  const perms = target.permissionsFor(botMember);
+  const embeds = [];
+  for (let i = 0; i < fields.length; i += 25) {
+    const embed = new EmbedBuilder()
+      .setColor(config.embed_color_primary_int)
+      .addFields(fields.slice(i, i + 25));
 
-  if (!perms?.has('SendMessages')) {
-    return interaction.editReply(
-      `❌ I don't have permission to post in ${target}. Please give the bot **Send Messages** and **Embed Links** permissions in that channel.`
-    );
+    if (i === 0) {
+      embed
+        .setTitle(`📋 ${config.league_name} — Team List`)
+        .setDescription(
+          `**${taken}** coaches signed · **${avail}** teams available\n` +
+          `Showing teams rated **${minRating}⭐${maxRating < 999 ? ' – ' + maxRating + '⭐' : '+'}**`
+        )
+        .setTimestamp();
+    }
+    embeds.push(embed);
   }
 
-  // Clean old bot messages in the channel (up to last 100) — skip if no permission
+  const listsChannel = findTextChannel(interaction.guild, config.channel_team_lists);
+  const target       = listsChannel || interaction.channel;
+
+  const botMember = interaction.guild.members.cache.get(client.user.id);
+  const perms     = target.permissionsFor(botMember);
+
+  if (!perms?.has('SendMessages')) {
+    return interaction.editReply(`❌ **Missing Channel Permissions**\nI don't have permission to post in ${target}.\n\n**Required permissions in that channel:**\n• Send Messages\n• Embed Links\n• Read Message History\n• Manage Messages (for cleanup)\n\nFix this in **Server Settings → Roles** or the channel's **Edit Channel → Permissions**, then try again. Run \`/checkpermissions\` for a full audit.`);
+  }
+
   if (perms.has('ManageMessages')) {
     try {
       const messages = await target.messages.fetch({ limit: 100 });
-      const botMsgs  = messages.filter(m => m.author.id === client.user.id);
-      for (const m of botMsgs.values()) await m.delete().catch(() => {});
-    } catch { /* ignore cleanup errors */ }
+      for (const m of messages.filter(m => m.author.id === client.user.id).values()) {
+        await m.delete().catch(() => {});
+      }
+    } catch { /* ignore */ }
   }
 
-  // Post all embeds
-  for (const embed of embeds) {
-    await target.send({ embeds: [embed] });
-  }
+  for (const embed of embeds) await target.send({ embeds: [embed] });
 
-  if (listsChannel && listsChannel.id !== interaction.channelId) {
-    await interaction.editReply(`✅ Team list posted in ${listsChannel}!`);
-  } else {
-    await interaction.editReply('✅ Team list posted!');
-  }
+  await interaction.editReply(
+    listsChannel && listsChannel.id !== interaction.channelId
+      ? `✅ Team list posted in ${listsChannel}!`
+      : '✅ Team list posted!'
+  );
 }
 
-// /advance
-// Build and post a weekly recap embed for the current week
+// /advance helpers ────────────────────────────────────
 async function postWeeklyRecap(guild, guildId, config, meta) {
   const newsChannel = findTextChannel(guild, config.channel_news_feed);
   if (!newsChannel) return;
 
   const { data: results } = await supabase
     .from('results')
-    .select('*, team1:teams!results_team1_id_fkey(team_name, conference), team2:teams!results_team2_id_fkey(team_name, conference)')
+    .select('*, team1:teams!results_team1_id_fkey(team_name), team2:teams!results_team2_id_fkey(team_name)')
     .eq('guild_id', guildId)
     .eq('season', meta.season)
     .eq('week', meta.week)
     .order('created_at', { ascending: true });
 
-  if (!results || results.length === 0) {
-    // No games submitted this week — skip recap
-    return;
-  }
+  if (!results || results.length === 0) return;
 
-  // Group results by conference if possible
   const lines = results.map(r => {
-    const t1 = r.team1?.team_name || 'Team 1';
-    const t2 = r.team2?.team_name || 'Team 2';
-    const winner = r.score1 > r.score2 ? t1 : r.score2 > r.score1 ? t2 : null;
-    const trophy = winner ? '🏆' : '🤝';
+    const t1     = r.team1?.team_name || 'Team 1';
+    const t2     = r.team2?.team_name || 'Team 2';
+    const trophy = r.score1 !== r.score2 ? '🏆' : '🤝';
     return `${trophy} **${t1}** ${r.score1} — ${r.score2} **${t2}**`;
   });
-
-  // Split into chunks of 15 lines max per embed field (Discord 1024 char limit)
-  const chunkSize = 15;
-  const chunks = [];
-  for (let i = 0; i < lines.length; i += chunkSize) {
-    chunks.push(lines.slice(i, i + chunkSize));
-  }
 
   const embed = new EmbedBuilder()
     .setTitle(`📋 Week ${meta.week} Recap — ${config.league_name}`)
@@ -1729,35 +1557,31 @@ async function postWeeklyRecap(guild, guildId, config, meta) {
     .setDescription(`Season **${meta.season}** · Week **${meta.week}** · **${results.length}** game${results.length !== 1 ? 's' : ''} played`)
     .setTimestamp();
 
-  chunks.forEach((chunk, i) => {
+  for (let i = 0; i < lines.length; i += 15) {
     embed.addFields({
-      name: chunks.length > 1 ? `Results (${i + 1}/${chunks.length})` : 'Results',
-      value: chunk.join("\n"),
+      name:   lines.length > 15 ? `Results (${Math.floor(i / 15) + 1})` : 'Results',
+      value:  lines.slice(i, i + 15).join('\n'),
       inline: false,
     });
-  });
+  }
 
   await newsChannel.send({ embeds: [embed] });
 }
 
+// /advance ────────────────────────────────────────────
 async function handleAdvance(interaction) {
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
 
   if (!config.feature_advance_system) {
-    return interaction.reply({ content: '❌ The advance system is disabled.', flags: 64 });
+    return interaction.reply({ content: '❌ **Advance System Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 });
   }
 
   const meta      = await getMeta(guildId);
   const intervals = config.advance_intervals_parsed || [24, 48];
+  const hoursInput = interaction.options.getInteger('hours') || intervals[0] || 24;
+  const deadline   = new Date(Date.now() + hoursInput * 60 * 60 * 1000);
 
-  // Get hours from option, default to first interval
-  let hoursInput = interaction.options.getInteger('hours');
-  if (!hoursInput) hoursInput = intervals[0] || 24;
-
-  const deadline = new Date(Date.now() + hoursInput * 60 * 60 * 1000);
-
-  // Format deadline in multiple timezones
   const formatTZ = (date, tz) =>
     date.toLocaleString('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
 
@@ -1776,30 +1600,24 @@ async function handleAdvance(interaction) {
     })
     .setTimestamp();
 
-  // Post weekly recap to news feed first
+  // Post recap for the week being closed, then bump the week counter
   await postWeeklyRecap(interaction.guild, guildId, config, meta);
-
-  // Bump the week and save deadline
   await setMeta(guildId, { week: meta.week + 1, advance_hours: hoursInput, advance_deadline: deadline.toISOString() });
 
-  // Post to advance tracker channel
   const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
-  console.log(`[advance] channel_advance_tracker config: "${config.channel_advance_tracker}" → found: ${advanceChannel?.name || 'NULL'}`);
-
   if (advanceChannel) {
     await advanceChannel.send({ embeds: [embed] });
     await interaction.reply({ content: `✅ Advance posted in ${advanceChannel}!`, flags: 64 });
   } else {
-    // Fall back to replying publicly in the current channel
     await interaction.reply({ embeds: [embed] });
   }
 }
 
-// /season-advance
+// /season-advance ─────────────────────────────────────
 async function handleSeasonAdvance(interaction) {
-  const guildId = interaction.guildId;
-  const config  = await getConfig(guildId);
-  const meta    = await getMeta(guildId);
+  const guildId   = interaction.guildId;
+  const config    = await getConfig(guildId);
+  const meta      = await getMeta(guildId);
   const newSeason = meta.season + 1;
 
   await setMeta(guildId, { season: newSeason, week: 1, advance_deadline: null });
@@ -1810,10 +1628,7 @@ async function handleSeasonAdvance(interaction) {
     .setDescription(`Season **${meta.season}** is over! Welcome to **Season ${newSeason}**!\nAll records reset. Good luck!`)
     .setTimestamp();
 
-  // Post to advance tracker
   const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
-  console.log(`[season-advance] channel_advance_tracker config: "${config.channel_advance_tracker}" → found: ${advanceChannel?.name || 'NULL'}`);
-
   if (advanceChannel) {
     await advanceChannel.send({ embeds: [embed] });
     await interaction.reply({ content: `✅ Season advance posted in ${advanceChannel}!`, flags: 64 });
@@ -1821,36 +1636,31 @@ async function handleSeasonAdvance(interaction) {
     await interaction.reply({ embeds: [embed] });
   }
 
-  // Also post to news feed
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
-  if (newsChannel) {
-    await newsChannel.send({ embeds: [embed] });
-  }
+  if (newsChannel) await newsChannel.send({ embeds: [embed] });
 }
 
-// /move-coach
+// /move-coach ─────────────────────────────────────────
 async function handleMoveCoach(interaction) {
-  const guildId   = interaction.guildId;
-  const config    = await getConfig(guildId);
-  const coachId   = interaction.options.getString('coach');
-  const user      = await interaction.guild.members.fetch(coachId).then(m => m.user).catch(() => null);
+  const guildId     = interaction.guildId;
+  const config      = await getConfig(guildId);
+  const coachId     = interaction.options.getString('coach');
   const newTeamName = interaction.options.getString('new-team');
 
-  if (!user) return interaction.editReply('❌ Could not find that coach. They may have left the server.');
-
   await interaction.deferReply();
+
+  const user = await interaction.guild.members.fetch(coachId).then(m => m.user).catch(() => null);
+  if (!user) return interaction.editReply('❌ **Coach Not Found**\nThis user couldn\'t be fetched from the server. They may have left.\n\nIf they\'re still in the server, try running `/move-coach` again and selecting from the autocomplete list.');
 
   const currentTeam = await getTeamByUser(user.id, guildId);
   const newTeam     = await getTeamByName(newTeamName, guildId);
 
-  if (!newTeam) return interaction.editReply(`❌ Team \`${newTeamName}\` not found.`);
+  if (!newTeam) return interaction.editReply(`❌ **Team Not Found: \`${newTeamName}\`**\nThis team doesn't exist in the database. Use the autocomplete dropdown to select a valid destination team.`);
   if (newTeam.user_id && newTeam.user_id !== user.id) {
-    return interaction.editReply(`❌ **${newTeam.team_name}** is already occupied.`);
+    return interaction.editReply(`❌ **Team Already Occupied**\n**${newTeam.team_name}** is currently assigned to another coach in this league.\n\nTo move this coach there, first run \`/resetteam\` on the current coach of that team, then try again.`);
   }
 
-  if (currentTeam) {
-    await unassignTeam(currentTeam.id, guildId);
-  }
+  if (currentTeam) await unassignTeam(currentTeam.id, guildId);
   await assignTeam(newTeam.id, user.id, guildId);
 
   const embed = new EmbedBuilder()
@@ -1859,33 +1669,98 @@ async function handleMoveCoach(interaction) {
     .setDescription(`<@${user.id}> has moved to **${newTeam.team_name}**.`)
     .addFields(
       { name: 'From', value: currentTeam ? currentTeam.team_name : 'No previous team', inline: true },
-      { name: 'To',   value: newTeam.team_name, inline: true },
+      { name: 'To',   value: newTeam.team_name,                                         inline: true },
     )
     .setTimestamp();
 
   await interaction.editReply({ embeds: [embed] });
+
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
   if (newsChannel && newsChannel.id !== interaction.channelId) {
     await newsChannel.send({ embeds: [embed] });
   }
 }
 
-// =====================================================
-// INTERACTION ROUTER
-// =====================================================
+// /checkpermissions ───────────────────────────────────
+async function handleCheckPermissions(interaction) {
+  const guildId   = interaction.guildId;
+  const guild     = interaction.guild;
+  const config    = await getConfig(guildId);
+  const botMember = guild.members.cache.get(client.user.id) || await guild.members.fetch(client.user.id);
+
+  await interaction.deferReply({ flags: 64 });
+
+  const REQUIRED = ['ViewChannel', 'SendMessages', 'EmbedLinks', 'ReadMessageHistory'];
+
+  const channelChecks = [
+    { key: 'channel_news_feed',       label: 'News Feed',       needsManage: false },
+    { key: 'channel_signed_coaches',  label: 'Signed Coaches',  needsManage: false },
+    { key: 'channel_team_lists',      label: 'Team Lists',      needsManage: true  },
+    { key: 'channel_advance_tracker', label: 'Advance Tracker', needsManage: false },
+    { key: 'channel_streaming',       label: 'Streaming',       needsManage: false },
+  ];
+
+  const lines  = ['**📺 Channel Permissions**'];
+  let allGood  = true;
+
+  for (const check of channelChecks) {
+    const chName  = config[check.key];
+    if (!chName) { lines.push(`⬜ **${check.label}** — not configured`); continue; }
+
+    const channel = findTextChannel(guild, chName);
+    if (!channel) { lines.push(`❌ **${check.label}** — \`#${chName}\` not found`); allGood = false; continue; }
+
+    const perms   = channel.permissionsFor(botMember);
+    const missing = REQUIRED.filter(f => !perms.has(f));
+    if (check.needsManage && !perms.has('ManageMessages')) missing.push('ManageMessages');
+
+    if (missing.length) {
+      lines.push(`❌ **${check.label}** (#${channel.name}) — missing: ${missing.join(', ')}`);
+      allGood = false;
+    } else {
+      lines.push(`✅ **${check.label}** (#${channel.name})`);
+    }
+  }
+
+  lines.push('', '**🔧 Server Permissions**');
+  const guildPerms = botMember.permissions;
+  if (guildPerms.has('ManageRoles'))     lines.push('✅ **Manage Roles**');
+  else { lines.push('❌ **Manage Roles** — required to assign head coach role'); allGood = false; }
+  lines.push(guildPerms.has('ManageNicknames') ? '✅ **Manage Nicknames**' : '⬜ **Manage Nicknames** (optional)');
+
+  lines.push('', '**👑 Role Hierarchy**');
+  const hcRole  = guild.roles.cache.find(r => r.name === config.role_head_coach);
+  const botRole = botMember.roles.highest;
+
+  if (!hcRole) {
+    lines.push(`⬜ Head coach role \`${config.role_head_coach}\` not found — will be created on first assignment`);
+  } else if (botRole.position <= hcRole.position) {
+    lines.push(`❌ Bot role **${botRole.name}** is below **${hcRole.name}** — move the bot role higher in Server Settings → Roles`);
+    allGood = false;
+  } else {
+    lines.push(`✅ Bot role **${botRole.name}** is above **${hcRole.name}**`);
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(allGood ? '✅ All Permissions OK' : '⚠️ Permission Issues Found')
+    .setColor(allGood ? 0x00ff00 : 0xff4444)
+    .setDescription(lines.join('\n'))
+    .setFooter({ text: 'Fix any ❌ items in channel/server settings, then run this again.' })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
 // =====================================================
 // AUTOCOMPLETE HANDLER
 // =====================================================
-
 async function handleAutocomplete(interaction) {
   const { commandName, guildId } = interaction;
   const focused = interaction.options.getFocused(true);
   const query   = focused.value.toLowerCase();
-
-  let choices = [];
+  let choices   = [];
 
   if (commandName === 'assign-team' || commandName === 'any-game-result') {
-    // Show all global teams (unfiltered — admin commands)
     const { data: teams } = await supabase
       .from('teams')
       .select('id, team_name, conference, star_rating')
@@ -1894,37 +1769,26 @@ async function handleAutocomplete(interaction) {
       .limit(25);
 
     choices = (teams || []).map(t => ({
-      name: `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
+      name:  `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
       value: t.team_name,
     }));
-  }
 
-  else if (commandName === 'move-coach') {
+  } else if (commandName === 'move-coach') {
     if (focused.name === 'coach') {
-      // Show currently assigned coaches in this guild
       const { data: assignments } = await supabase
         .from('team_assignments')
-        .select('user_id, team_id, teams(team_name)')
+        .select('user_id, teams(team_name)')
         .eq('guild_id', guildId);
 
-      // Fetch display names from guild
       const guild = client.guilds.cache.get(guildId);
-      const memberChoices = [];
       for (const a of (assignments || [])) {
-        try {
-          const member = await guild.members.fetch(a.user_id).catch(() => null);
-          if (!member) continue;
-          const displayName = member.displayName;
-          if (!displayName.toLowerCase().includes(query)) continue;
-          memberChoices.push({
-            name: `${displayName} — ${a.teams?.team_name || 'Unknown Team'}`,
-            value: a.user_id,
-          });
-        } catch { continue; }
+        const member = await guild.members.fetch(a.user_id).catch(() => null);
+        if (!member || !member.displayName.toLowerCase().includes(query)) continue;
+        choices.push({ name: `${member.displayName} — ${a.teams?.team_name || 'Unknown'}`, value: a.user_id });
       }
-      choices = memberChoices.slice(0, 25);
+      choices = choices.slice(0, 25);
+
     } else if (focused.name === 'new-team') {
-      // Show all global teams for destination
       const { data: teams } = await supabase
         .from('teams')
         .select('id, team_name, conference, star_rating')
@@ -1933,14 +1797,12 @@ async function handleAutocomplete(interaction) {
         .limit(25);
 
       choices = (teams || []).map(t => ({
-        name: `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
+        name:  `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
         value: t.team_name,
       }));
     }
-  }
 
-  else if (commandName === 'game-result') {
-    // Opponent field — show all teams except the user's own
+  } else if (commandName === 'game-result') {
     const userTeam = await getTeamByUser(interaction.user.id, guildId);
     const { data: teams } = await supabase
       .from('teams')
@@ -1951,116 +1813,92 @@ async function handleAutocomplete(interaction) {
 
     choices = (teams || [])
       .filter(t => !userTeam || t.team_name !== userTeam.team_name)
-      .map(t => ({
-        name: `${t.team_name}${t.conference ? ' · ' + t.conference : ''}`,
-        value: t.team_name,
-      }));
-  }
+      .map(t => ({ name: `${t.team_name}${t.conference ? ' · ' + t.conference : ''}`, value: t.team_name }));
 
-  else if (commandName === 'resetteam') {
-    // Only show teams that are currently assigned in this guild
+  } else if (commandName === 'resetteam') {
     const { data: assignments } = await supabase
       .from('team_assignments')
       .select('team_id, user_id, teams(team_name, conference)')
       .eq('guild_id', guildId);
 
     choices = (assignments || [])
-      .filter(a => a.teams && a.teams.team_name.toLowerCase().includes(query))
+      .filter(a => a.teams?.team_name.toLowerCase().includes(query))
       .slice(0, 25)
-      .map(a => ({
-        name: a.teams.team_name + (a.teams.conference ? ' · ' + a.teams.conference : ''),
-        value: a.teams.team_name,
-      }));
-  }
+      .map(a => ({ name: `${a.teams.team_name}${a.teams.conference ? ' · ' + a.teams.conference : ''}`, value: a.teams.team_name }));
 
-  else if (commandName === 'config' && focused.name === 'setting') {
+  } else if (commandName === 'config' && focused.name === 'setting') {
     const allSettings = [
-      { label: 'League Name',             key: 'league_name',                  hint: 'League display name' },
-      { label: 'League Abbreviation',     key: 'league_abbreviation',          hint: 'Short name for stream detection' },
-      { label: 'News Feed Channel',       key: 'channel_news_feed',            hint: 'Channel for results & announcements' },
-      { label: 'Advance Tracker Channel', key: 'channel_advance_tracker',      hint: 'Channel for advance notices' },
-      { label: 'Team Lists Channel',      key: 'channel_team_lists',           hint: 'Channel for team availability list' },
-      { label: 'Signed Coaches Channel',  key: 'channel_signed_coaches',       hint: 'Channel for signing announcements' },
-      { label: 'Streaming Channel',       key: 'channel_streaming',            hint: 'Channel to monitor for stream links' },
-      { label: 'Head Coach Role',         key: 'role_head_coach',              hint: 'Role assigned to coaches' },
-      { label: 'Min Star Rating',         key: 'star_rating_for_offers',       hint: 'Minimum star rating for job offers' },
-      { label: 'Max Star Rating',         key: 'star_rating_max_for_offers',   hint: 'Maximum star rating for job offers' },
-      { label: 'Offers Per User',         key: 'job_offers_count',             hint: 'Number of offers per user' },
-      { label: 'Offer Expiry Hours',      key: 'job_offers_expiry_hours',      hint: 'Hours before offers expire (1–24)' },
-      { label: 'Stream Reminder Minutes', key: 'stream_reminder_minutes',      hint: 'Minutes before stream reminder fires' },
-      { label: 'Advance Intervals',       key: 'advance_intervals',            hint: 'Available advance intervals e.g. [24,48]' },
-      { label: 'Primary Embed Color',     key: 'embed_color_primary',          hint: 'Primary embed color hex e.g. 0x1e90ff' },
-      { label: 'Win Embed Color',         key: 'embed_color_win',              hint: 'Win result embed color hex' },
-      { label: 'Loss Embed Color',        key: 'embed_color_loss',             hint: 'Loss result embed color hex' },
+      { label: 'League Name',             key: 'league_name',                hint: 'League display name' },
+      { label: 'League Abbreviation',     key: 'league_abbreviation',        hint: 'Short name for stream detection' },
+      { label: 'News Feed Channel',       key: 'channel_news_feed',          hint: 'Channel for results & announcements' },
+      { label: 'Advance Tracker Channel', key: 'channel_advance_tracker',    hint: 'Channel for advance notices' },
+      { label: 'Team Lists Channel',      key: 'channel_team_lists',         hint: 'Channel for team availability list' },
+      { label: 'Signed Coaches Channel',  key: 'channel_signed_coaches',     hint: 'Channel for signing announcements' },
+      { label: 'Streaming Channel',       key: 'channel_streaming',          hint: 'Channel to monitor for stream links' },
+      { label: 'Head Coach Role',         key: 'role_head_coach',            hint: 'Role assigned to coaches' },
+      { label: 'Min Star Rating',         key: 'star_rating_for_offers',     hint: 'Minimum star rating for job offers' },
+      { label: 'Max Star Rating',         key: 'star_rating_max_for_offers', hint: 'Maximum star rating for job offers' },
+      { label: 'Offers Per User',         key: 'job_offers_count',           hint: 'Number of offers per user' },
+      { label: 'Offer Expiry Hours',      key: 'job_offers_expiry_hours',    hint: 'Hours before offers expire (1–24)' },
+      { label: 'Stream Reminder Minutes', key: 'stream_reminder_minutes',    hint: 'Minutes before stream reminder fires' },
+      { label: 'Advance Intervals',       key: 'advance_intervals',          hint: 'Available advance intervals e.g. [24,48]' },
+      { label: 'Primary Embed Color',     key: 'embed_color_primary',        hint: 'Primary embed color hex e.g. 0x1e90ff' },
+      { label: 'Win Embed Color',         key: 'embed_color_win',            hint: 'Win result embed color hex' },
+      { label: 'Loss Embed Color',        key: 'embed_color_loss',           hint: 'Loss result embed color hex' },
     ];
-
     choices = allSettings
-      .filter(s =>
-        s.label.toLowerCase().includes(query) ||
-        s.key.includes(query) ||
-        s.hint.toLowerCase().includes(query)
-      )
+      .filter(s => s.label.toLowerCase().includes(query) || s.key.includes(query) || s.hint.toLowerCase().includes(query))
       .slice(0, 25)
       .map(s => ({ name: `${s.label} — ${s.hint}`, value: s.key }));
-  }
 
-  else if (commandName === 'config' && focused.name === 'value') {
-    // Get the currently selected setting to know what kind of value to suggest
+  } else if (commandName === 'config' && focused.name === 'value') {
     const setting = interaction.options.getString('setting') || '';
-    const guild = client.guilds.cache.get(guildId);
+    const guild   = client.guilds.cache.get(guildId);
 
     if (setting.startsWith('channel_') && guild) {
-      // Suggest text channels
-      const channels = guild.channels.cache
-        .filter(c => c.type === 0 && c.name.toLowerCase().includes(query))
+      choices = [...guild.channels.cache
+        .filter(c => c.type === ChannelType.GuildText && c.name.toLowerCase().includes(query))
         .sort((a, b) => a.name.localeCompare(b.name))
-        .map(c => ({ name: `#${c.name}`, value: c.name }));
-      choices = [...channels].slice(0, 25);
+        .map(c => ({ name: `#${c.name}`, value: c.name }))
+      ].slice(0, 25);
 
     } else if (setting === 'role_head_coach' && guild) {
-      // Suggest roles
-      const roles = guild.roles.cache
+      choices = [...guild.roles.cache
         .filter(r => !r.managed && r.name !== '@everyone' && r.name.toLowerCase().includes(query))
         .sort((a, b) => b.position - a.position)
-        .map(r => ({ name: `@${r.name}`, value: r.name }));
-      choices = [...roles].slice(0, 25);
+        .map(r => ({ name: `@${r.name}`, value: r.name }))
+      ].slice(0, 25);
 
     } else if (setting === 'star_rating_for_offers' || setting === 'star_rating_max_for_offers') {
-      // Suggest common star ratings
       choices = ['1.0','1.5','2.0','2.5','3.0','3.5','4.0','4.5','5.0']
-        .filter(v => v.includes(query))
-        .map(v => ({ name: `${v} stars`, value: v }));
+        .filter(v => v.includes(query)).map(v => ({ name: `${v} stars`, value: v }));
 
     } else if (setting === 'job_offers_expiry_hours') {
       choices = ['1','2','4','6','8','12','16','24']
-        .filter(v => v.includes(query))
-        .map(v => ({ name: `${v} hours`, value: v }));
+        .filter(v => v.includes(query)).map(v => ({ name: `${v} hours`, value: v }));
 
     } else if (setting === 'job_offers_count') {
       choices = ['1','2','3','4','5']
-        .filter(v => v.includes(query))
-        .map(v => ({ name: `${v} offers`, value: v }));
+        .filter(v => v.includes(query)).map(v => ({ name: `${v} offers`, value: v }));
 
     } else if (setting === 'stream_reminder_minutes') {
       choices = ['15','30','45','60','90','120']
-        .filter(v => v.includes(query))
-        .map(v => ({ name: `${v} minutes`, value: v }));
+        .filter(v => v.includes(query)).map(v => ({ name: `${v} minutes`, value: v }));
 
     } else if (setting === 'advance_intervals') {
       choices = ['[24, 48]','[12, 24, 48]','[24]','[48]','[6, 12, 24, 48]']
-        .filter(v => v.includes(query))
-        .map(v => ({ name: v, value: v }));
+        .filter(v => v.includes(query)).map(v => ({ name: v, value: v }));
 
     } else if (setting.startsWith('embed_color_')) {
       choices = [
-        { name: 'Blue (default)',  value: '0x1e90ff' },
-        { name: 'Green',           value: '0x00ff00' },
-        { name: 'Red',             value: '0xff0000' },
-        { name: 'Gold',            value: '0xffd700' },
-        { name: 'Purple',          value: '0x9b59b6' },
-        { name: 'Orange',          value: '0xff8c00' },
-        { name: 'White',           value: '0xffffff' },
-        { name: 'Black',           value: '0x000000' },
+        { name: 'Blue (default)', value: '0x1e90ff' },
+        { name: 'Green',          value: '0x00ff00' },
+        { name: 'Red',            value: '0xff0000' },
+        { name: 'Gold',           value: '0xffd700' },
+        { name: 'Purple',         value: '0x9b59b6' },
+        { name: 'Orange',         value: '0xff8c00' },
+        { name: 'White',          value: '0xffffff' },
+        { name: 'Black',          value: '0x000000' },
       ].filter(c => c.name.toLowerCase().includes(query) || c.value.includes(query));
     }
   }
@@ -2068,16 +1906,29 @@ async function handleAutocomplete(interaction) {
   await interaction.respond(choices);
 }
 
+// =====================================================
+// INTERACTION ROUTER
+// =====================================================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // Handle autocomplete before anything else
-    if (interaction.isAutocomplete()) {
-      return handleAutocomplete(interaction);
-    }
+    if (interaction.isAutocomplete()) return handleAutocomplete(interaction);
 
     if (interaction.isChatInputCommand()) {
       switch (interaction.commandName) {
-        case 'setup':         return handleSetup(interaction);
+        case 'setup':             return handleSetup(interaction);
+        case 'checkpermissions':  return handleCheckPermissions(interaction);
+        case 'joboffers':         return handleJobOffers(interaction);
+        case 'game-result':       return handleGameResult(interaction);
+        case 'any-game-result':   return handleAnyGameResult(interaction);
+        case 'press-release':     return handlePressRelease(interaction);
+        case 'ranking':           return handleRanking(interaction);
+        case 'ranking-all-time':  return handleRankingAllTime(interaction);
+        case 'assign-team':       return handleAssignTeam(interaction);
+        case 'resetteam':         return handleResetTeam(interaction);
+        case 'listteams':         return handleListTeams(interaction);
+        case 'advance':           return handleAdvance(interaction);
+        case 'season-advance':    return handleSeasonAdvance(interaction);
+        case 'move-coach':        return handleMoveCoach(interaction);
         case 'config':
           switch (interaction.options.getSubcommand()) {
             case 'view':     return handleConfigView(interaction);
@@ -2086,59 +1937,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
             case 'reload':   return handleConfigReload(interaction);
           }
           break;
-        case 'joboffers':          return handleJobOffers(interaction);
-        case 'game-result':        return handleGameResult(interaction);
-        case 'any-game-result':    return handleAnyGameResult(interaction);
-        case 'press-release':      return handlePressRelease(interaction);
-        case 'ranking':            return handleRanking(interaction);
-        case 'ranking-all-time':   return handleRankingAllTime(interaction);
-        case 'assign-team':        return handleAssignTeam(interaction);
-        case 'resetteam':          return handleResetTeam(interaction);
-        case 'listteams':          return handleListTeams(interaction);
-        case 'advance':            return handleAdvance(interaction);
-        case 'season-advance':     return handleSeasonAdvance(interaction);
-        case 'move-coach':         return handleMoveCoach(interaction);
-        default:
-          await interaction.reply({ content: '❓ Unknown command.', flags: 64 });
       }
     }
 
-    // Handle Accept Offer buttons
     if (interaction.isButton()) {
-      if (interaction.customId.startsWith('accept-offer_')) {
-        return handleAcceptOffer(interaction);
-      }
+      if (interaction.customId.startsWith('accept-offer_')) return handleAcceptOffer(interaction);
     }
 
-    // Handle select menu for feature toggles
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId.startsWith('features-toggle-')) {
         const guildId  = interaction.guildId;
         const selected = interaction.values;
-        const allFeatures = [
-          'feature_job_offers',
-          'feature_stream_reminders',
-          'feature_advance_system',
-          'feature_press_releases',
-          'feature_rankings',
-        ];
-        const updates = {};
-        for (const f of allFeatures) {
-          updates[f] = selected.includes(f);
-        }
+        const allFeatures = ['feature_job_offers','feature_stream_reminders','feature_advance_system','feature_press_releases','feature_rankings'];
+        const updates  = Object.fromEntries(allFeatures.map(f => [f, selected.includes(f)]));
         await saveConfig(guildId, updates);
         const lines = allFeatures.map(f => `${updates[f] ? '✅' : '❌'} ${f.replace('feature_', '').replace(/_/g, ' ')}`);
         await interaction.update({ content: `**Features updated:**\n${lines.join('\n')}`, components: [] });
       }
     }
+
   } catch (err) {
     console.error('[interaction] Error:', err);
-    const msg = { content: `❌ An error occurred: ${err.message}`, flags: 64 };
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp(msg).catch(() => {});
-    } else {
-      await interaction.reply(msg).catch(() => {});
-    }
+    const msg = { content: `❌ **Unexpected Error**\n\`\`\`${err.message}\`\`\`\nThis has been logged. If it keeps happening, try \`/config reload\` to refresh settings, or check your Render logs for details.`, flags: 64 };
+    if (interaction.replied || interaction.deferred) await interaction.followUp(msg).catch(() => {});
+    else await interaction.reply(msg).catch(() => {});
   }
 });
 
@@ -2146,81 +1968,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // MESSAGE LISTENER — Stream Reminders
 // =====================================================
 client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot) return;
-  const guildId = message.guildId;
-  if (!guildId) return;
+  if (message.author.bot || !message.guildId) return;
 
-  const config = await getConfig(guildId).catch(() => null);
-  if (!config || !config.feature_stream_reminders) return;
+  const config = await getConfig(message.guildId).catch(() => null);
+  if (!config?.feature_stream_reminders) return;
 
-  // Check if in streaming channel or a team channel
-  const isStreamChannel = message.channel.name?.toLowerCase() === config.channel_streaming?.toLowerCase();
+  if (message.channel.name?.toLowerCase() !== config.channel_streaming?.toLowerCase()) return;
 
-  if (!isStreamChannel) return;
-
-  // Check for YouTube/Twitch links
   const hasStreamLink = /https?:\/\/(www\.)?(youtube\.com|youtu\.be|twitch\.tv)\//i.test(message.content);
   if (!hasStreamLink) return;
 
   const minutes = config.stream_reminder_minutes || 45;
-  scheduleStreamReminder(message.channel, message.author.id, guildId, minutes);
+  scheduleStreamReminder(message.channel, message.author.id, message.guildId, minutes);
   console.log(`[stream] Scheduled ${minutes}min reminder for ${message.author.username} in #${message.channel.name}`);
 });
 
 // =====================================================
-// SELF-PING (Keep Render alive)
-// =====================================================
-if (SELF_PING_URL) {
-  const http = require('http');
-  const https = require('https');
-  setInterval(() => {
-    const mod = SELF_PING_URL.startsWith('https') ? https : http;
-    mod.get(SELF_PING_URL, () => {}).on('error', () => {});
-  }, 14 * 60 * 1000); // every 14 minutes
-
-  // Simple HTTP server for Render health checks
-  http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('Dynasty Bot OK');
-  }).listen(PORT, () => {
-    console.log(`[server] HTTP server listening on port ${PORT}`);
-  });
-}
-
-// =====================================================
 // GUILD AUTO-SETUP
 // =====================================================
-
-/**
- * Called whenever the bot joins a new server.
- * Creates a default config + meta row so admins can
- * immediately run /setup without any manual SQL.
- */
 async function initGuild(guild) {
   try {
-    // Check if config already exists for this guild
-    const { data } = await supabase
-      .from('config')
-      .select('guild_id')
-      .eq('guild_id', guild.id)
-      .single();
-
+    const { data } = await supabase.from('config').select('guild_id').eq('guild_id', guild.id).single();
     if (data) {
-      console.log(`[guild] Config already exists for ${guild.name} (${guild.id})`);
+      console.log(`[guild] Config exists for ${guild.name} (${guild.id})`);
       return;
     }
 
-    // Create default config row
     await createDefaultConfig(guild.id, guild.name);
+    await supabase.from('meta').upsert({ guild_id: guild.id, season: 1, week: 1 }, { onConflict: 'guild_id' });
+    console.log(`[guild] Auto-created config for: ${guild.name} (${guild.id})`);
 
-    // Create default meta row
-    await supabase
-      .from('meta')
-      .upsert({ guild_id: guild.id, season: 1, week: 1 }, { onConflict: 'guild_id' });
-
-    console.log(`[guild] Auto-created config for new guild: ${guild.name} (${guild.id})`);
-
-    // Try to notify the server owner
     const owner = await guild.fetchOwner().catch(() => null);
     if (owner) {
       const embed = new EmbedBuilder()
@@ -2228,29 +2005,24 @@ async function initGuild(guild) {
         .setColor(0x1e90ff)
         .setDescription(
           `Thanks for adding Dynasty Bot to **${guild.name}**!\n\n` +
-          `A default configuration has been created for your server. ` +
-          `Run \`/setup\` in your server to customize your league settings, ` +
-          `or use \`/config view\` to see the defaults.`
+          `A default configuration has been created. Run \`/setup\` to customize your league settings, or \`/config view\` to see the defaults.`
         )
-        .addFields(
-          { name: '📋 Next Steps', value:
-            '1. Run `/setup` to configure your league\n' +
-            '2. Use `/listteams` to post available teams\n' +
-            '3. Use `/assign-team` to assign coaches',
-          }
-        );
+        .addFields({ name: '📋 Next Steps', value:
+          '1. Run `/setup` to configure your league\n' +
+          '2. Use `/listteams` to post available teams\n' +
+          '3. Use `/assign-team` to assign coaches',
+        });
       await owner.send({ embeds: [embed] }).catch(() => {
-        console.log(`[guild] Could not DM owner of ${guild.name}, skipping welcome message.`);
+        console.log(`[guild] Could not DM owner of ${guild.name}`);
       });
     }
   } catch (err) {
-    console.error(`[guild] Failed to auto-init guild ${guild.name} (${guild.id}):`, err.message);
+    console.error(`[guild] Failed to init ${guild.name} (${guild.id}):`, err.message);
   }
 }
 
-// Fires when the bot is invited to a new server
 client.on(Events.GuildCreate, async (guild) => {
-  console.log(`[guild] Joined new guild: ${guild.name} (${guild.id})`);
+  console.log(`[guild] Joined: ${guild.name} (${guild.id})`);
   await initGuild(guild);
 });
 
@@ -2261,15 +2033,10 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`[bot] Logged in as ${c.user.tag}`);
   await registerCommands();
 
-  // Sync any guilds that were added while the bot was offline
   console.log(`[bot] Syncing ${c.guilds.cache.size} guild(s)...`);
-  for (const guild of c.guilds.cache.values()) {
-    await initGuild(guild);
-  }
-
+  for (const guild of c.guilds.cache.values()) await initGuild(guild);
   console.log(`[bot] Ready! Serving ${c.guilds.cache.size} guild(s).`);
 
-  // Check for expired job offers every 30 minutes
   expireJobOffers();
   setInterval(expireJobOffers, 30 * 60 * 1000);
 });
