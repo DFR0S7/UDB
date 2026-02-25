@@ -412,8 +412,7 @@ function buildCommands() {
     new SlashCommandBuilder()
       .setName('advance')
       .setDescription('Advance to next week (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addIntegerOption(o => o.setName('hours').setDescription('Hours until advance').setRequired(false)),
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
     new SlashCommandBuilder()
       .setName('season-advance')
@@ -1579,8 +1578,42 @@ async function handleAdvance(interaction) {
 
   const meta      = await getMeta(guildId);
   const intervals = config.advance_intervals_parsed || [24, 48];
-  const hoursInput = interaction.options.getInteger('hours') || intervals[0] || 24;
-  const deadline   = new Date(Date.now() + hoursInput * 60 * 60 * 1000);
+
+  // Build one button per configured interval
+  const buttons = intervals.map(h =>
+    new ButtonBuilder()
+      .setCustomId(`advance_${guildId}_${h}`)
+      .setLabel(`${h} Hours`)
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  const rows = [];
+  for (let i = 0; i < buttons.length; i += 5) {
+    rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
+  }
+
+  await interaction.reply({
+    content:
+      `⏭️ **Advance to Week ${meta.week + 1}?**\n` +
+      `Season **${meta.season}** · Currently on Week **${meta.week}**\n\n` +
+      `Select the deadline window for this week's games:`,
+    components: rows,
+    flags: 64,
+  });
+}
+
+// Handles the button click after /advance shows interval options
+async function handleAdvanceConfirm(interaction) {
+  // customId format: advance_guildId_hours
+  const parts   = interaction.customId.split('_');
+  const guildId = parts[1];
+  const hours   = parseInt(parts[2]);
+
+  await interaction.deferUpdate();
+
+  const config  = await getConfig(guildId);
+  const meta    = await getMeta(guildId);
+  const deadline = new Date(Date.now() + hours * 60 * 60 * 1000);
 
   const formatTZ = (date, tz) =>
     date.toLocaleString('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
@@ -1588,7 +1621,7 @@ async function handleAdvance(interaction) {
   const embed = new EmbedBuilder()
     .setTitle(`⏭️ Advance — Season ${meta.season} Week ${meta.week + 1}`)
     .setColor(config.embed_color_primary_int)
-    .setDescription(`The league is advancing to **Week ${meta.week + 1}**!\nAll games must be completed within **${hoursInput} hours**.`)
+    .setDescription(`The league is advancing to **Week ${meta.week + 1}**!\nAll games must be completed within **${hours} hours**.`)
     .addFields({
       name: '🕐 Deadline',
       value:
@@ -1602,14 +1635,18 @@ async function handleAdvance(interaction) {
 
   // Post recap for the week being closed, then bump the week counter
   await postWeeklyRecap(interaction.guild, guildId, config, meta);
-  await setMeta(guildId, { week: meta.week + 1, advance_hours: hoursInput, advance_deadline: deadline.toISOString() });
+  await setMeta(guildId, { week: meta.week + 1, advance_hours: hours, advance_deadline: deadline.toISOString() });
 
+  // Remove buttons from the original ephemeral message
+  await interaction.editReply({ content: `✅ Advance confirmed — **${hours} hour** deadline set.`, components: [] });
+
+  // Post publicly to advance tracker channel
   const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
   if (advanceChannel) {
     await advanceChannel.send({ embeds: [embed] });
-    await interaction.reply({ content: `✅ Advance posted in ${advanceChannel}!`, flags: 64 });
   } else {
-    await interaction.reply({ embeds: [embed] });
+    // Fall back to current channel if advance tracker not found
+    await interaction.followUp({ embeds: [embed] });
   }
 }
 
@@ -1942,6 +1979,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isButton()) {
       if (interaction.customId.startsWith('accept-offer_')) return handleAcceptOffer(interaction);
+      if (interaction.customId.startsWith('advance_'))      return handleAdvanceConfirm(interaction);
     }
 
     if (interaction.isStringSelectMenu()) {
