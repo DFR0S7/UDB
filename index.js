@@ -136,7 +136,10 @@ const CONFIG_DEFAULTS = {
 function parseConfig(data) {
   let intervals = [24, 48];
   try {
-    const parsed = JSON.parse(data.advance_intervals);
+    const raw = (data.advance_intervals || '').trim();
+    // Support both "[12, 24, 48]" (JSON) and "12,24,48" (plain CSV)
+    const normalized = raw.startsWith('[') ? raw : `[${raw}]`;
+    const parsed = JSON.parse(normalized);
     if (Array.isArray(parsed) && parsed.length > 0) {
       intervals = parsed.map(Number).filter(n => !isNaN(n));
     }
@@ -363,7 +366,8 @@ function buildCommands() {
       .setDescription('Submit your game result')
       .addStringOption(o => o.setName('opponent').setDescription('Opponent team name').setRequired(true).setAutocomplete(true))
       .addIntegerOption(o => o.setName('your-score').setDescription('Your score').setRequired(true))
-      .addIntegerOption(o => o.setName('opponent-score').setDescription('Opponent score').setRequired(true)),
+      .addIntegerOption(o => o.setName('opponent-score').setDescription('Opponent score').setRequired(true))
+      .addStringOption(o => o.setName('summary').setDescription('Optional game summary or highlights').setRequired(false).setMaxLength(500)),
 
     new SlashCommandBuilder()
       .setName('press-release')
@@ -441,7 +445,8 @@ function buildCommands() {
       .addStringOption(o => o.setName('team1').setDescription('First team name').setRequired(true).setAutocomplete(true))
       .addStringOption(o => o.setName('team2').setDescription('Second team name').setRequired(true).setAutocomplete(true))
       .addIntegerOption(o => o.setName('score1').setDescription('Team 1 score').setRequired(true))
-      .addIntegerOption(o => o.setName('score2').setDescription('Team 2 score').setRequired(true)),
+      .addIntegerOption(o => o.setName('score2').setDescription('Team 2 score').setRequired(true))
+      .addIntegerOption(o => o.setName('week').setDescription('Week number (defaults to current week)').setRequired(false).setMinValue(1)),
 
     new SlashCommandBuilder()
       .setName('checkpermissions')
@@ -1077,7 +1082,14 @@ async function handleAcceptOffer(interaction) {
     const member = await guild.members.fetch(userId).catch(() => null);
     if (member) {
       const hcRole = await findOrCreateRole(guild, config.role_head_coach);
-      await member.roles.add(hcRole).catch(() => {});
+      try {
+        await member.roles.add(hcRole);
+      } catch (roleErr) {
+        console.error('[roles] Failed to assign head coach role on offer accept:', roleErr.message);
+        // Notify in news feed — team assignment still succeeded
+        const newsChannel = findTextChannel(guild, config.channel_news_feed);
+        if (newsChannel) newsChannel.send({ content: `⚠️ <@${userId}> accepted **${offer.teams.team_name}** but I couldn't assign the **${config.role_head_coach}** role. Check that my role is above it in Server Settings → Roles, or run \`/checkpermissions\`.` });
+      }
       if (!config.role_head_coach_id) await saveConfig(guildId, { role_head_coach_id: hcRole.id });
     }
   }
@@ -1161,6 +1173,7 @@ async function handleGameResult(interaction) {
   const opponentName = interaction.options.getString('opponent');
   const yourScore    = interaction.options.getInteger('your-score');
   const oppScore     = interaction.options.getInteger('opponent-score');
+  const summary      = interaction.options.getString('summary') || null;
   const userId       = interaction.user.id;
 
   const yourTeam = await getTeamByUser(userId, guildId);
@@ -1202,13 +1215,15 @@ async function handleGameResult(interaction) {
     .setColor(color)
     .setDescription(`**${yourTeam.team_name}** vs **${oppTeam.team_name}**`)
     .addFields(
-      { name: yourTeam.team_name,           value: `${yourScore}`,                         inline: true },
-      { name: result,                        value: '—',                                    inline: true },
-      { name: oppTeam.team_name,            value: `${oppScore}`,                          inline: true },
-      { name: `${yourTeam.team_name} Record`, value: `${yourRecord.wins}-${yourRecord.losses}`, inline: true },
-      { name: `${oppTeam.team_name} Record`,  value: `${oppRecord.wins}-${oppRecord.losses}`,   inline: true },
+      { name: yourTeam.team_name,              value: `${yourScore}`,                              inline: true },
+      { name: result,                           value: '—',                                         inline: true },
+      { name: oppTeam.team_name,               value: `${oppScore}`,                               inline: true },
+      { name: `${yourTeam.team_name} Record`,  value: `${yourRecord.wins}-${yourRecord.losses}`,   inline: true },
+      { name: `${oppTeam.team_name} Record`,   value: `${oppRecord.wins}-${oppRecord.losses}`,     inline: true },
     )
     .setFooter({ text: `Submitted by ${interaction.user.displayName}` });
+
+  if (summary) embed.addFields({ name: '📝 Game Summary', value: summary, inline: false });
 
   await interaction.reply({ embeds: [embed] });
 
@@ -1227,6 +1242,15 @@ async function handleAnyGameResult(interaction) {
   const team2Name = interaction.options.getString('team2');
   const score1    = interaction.options.getInteger('score1');
   const score2    = interaction.options.getInteger('score2');
+  const weekInput = interaction.options.getInteger('week');
+  const week      = weekInput || meta.week;
+
+  if (weekInput && (weekInput < 1 || weekInput > meta.week)) {
+    return interaction.reply({
+      content: `❌ **Invalid Week**\nWeek **${weekInput}** is out of range. The current season is on Week **${meta.week}** — enter a week between 1 and ${meta.week}.`,
+      flags: 64,
+    });
+  }
 
   const team1 = await getTeamByName(team1Name, guildId);
   const team2 = await getTeamByName(team2Name, guildId);
@@ -1244,7 +1268,7 @@ async function handleAnyGameResult(interaction) {
   await upsertRecord({ ...record2, team_id: team2.id, season: meta.season, guild_id: guildId });
 
   await supabase.from('results').insert({
-    guild_id: guildId, season: meta.season, week: meta.week,
+    guild_id: guildId, season: meta.season, week,
     team1_id: team1.id, team2_id: team2.id,
     score1, score2, submitted_by: interaction.user.id,
   });
@@ -1254,16 +1278,16 @@ async function handleAnyGameResult(interaction) {
   const color = tied ? 0xffa500 : (won1 ? config.embed_color_win_int : config.embed_color_loss_int);
 
   const embed = new EmbedBuilder()
-    .setTitle(`🏈 Game Result Entered — S${meta.season} W${meta.week}`)
+    .setTitle(`🏈 Game Result Entered — S${meta.season} W${week}`)
     .setColor(color)
     .addFields(
-      { name: team1.team_name,              value: `${score1}`,                        inline: true },
-      { name: tied ? 'TIE' : (won1 ? 'WIN' : 'LOSS'), value: '—',                     inline: true },
-      { name: team2.team_name,              value: `${score2}`,                        inline: true },
-      { name: `${team1.team_name} Record`,  value: `${record1.wins}-${record1.losses}`, inline: true },
-      { name: `${team2.team_name} Record`,  value: `${record2.wins}-${record2.losses}`, inline: true },
+      { name: team1.team_name,              value: `${score1}`,                          inline: true },
+      { name: tied ? 'TIE' : (won1 ? 'WIN' : 'LOSS'), value: '—',                       inline: true },
+      { name: team2.team_name,              value: `${score2}`,                          inline: true },
+      { name: `${team1.team_name} Record`,  value: `${record1.wins}-${record1.losses}`,  inline: true },
+      { name: `${team2.team_name} Record`,  value: `${record2.wins}-${record2.losses}`,  inline: true },
     )
-    .setFooter({ text: `Entered by ${interaction.user.displayName} (admin)` });
+    .setFooter({ text: `Entered by ${interaction.user.displayName} (admin)${weekInput && weekInput !== meta.week ? ` · Backfilled to Week ${week}` : ''}` });
 
   await interaction.reply({ embeds: [embed] });
 
@@ -1332,7 +1356,13 @@ async function handleRanking(interaction) {
     .setDescription(lines.join('\n'))
     .setTimestamp();
 
-  await interaction.reply({ embeds: [embed] });
+  const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
+  if (newsChannel && newsChannel.id !== interaction.channelId) {
+    await newsChannel.send({ embeds: [embed] });
+    await interaction.reply({ content: `✅ Standings posted in ${newsChannel}!`, flags: 64 });
+  } else {
+    await interaction.reply({ embeds: [embed] });
+  }
 }
 
 // /ranking-all-time ───────────────────────────────────
@@ -1370,7 +1400,13 @@ async function handleRankingAllTime(interaction) {
     .setDescription(lines.join('\n'))
     .setTimestamp();
 
-  await interaction.reply({ embeds: [embed] });
+  const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
+  if (newsChannel && newsChannel.id !== interaction.channelId) {
+    await newsChannel.send({ embeds: [embed] });
+    await interaction.reply({ content: `✅ All-time rankings posted in ${newsChannel}!`, flags: 64 });
+  } else {
+    await interaction.reply({ embeds: [embed] });
+  }
 }
 
 // /assign-team ────────────────────────────────────────
@@ -1400,7 +1436,12 @@ async function handleAssignTeam(interaction) {
   const member = await guild.members.fetch(user.id).catch(() => null);
   if (member) {
     const hcRole = await findOrCreateRole(guild, config.role_head_coach);
-    if (!member.roles.cache.has(hcRole.id)) await member.roles.add(hcRole);
+    try {
+      if (!member.roles.cache.has(hcRole.id)) await member.roles.add(hcRole);
+    } catch (roleErr) {
+      console.error('[roles] Failed to assign head coach role on assign-team:', roleErr.message);
+      await interaction.followUp({ content: `⚠️ Team assigned, but I couldn't add the **${config.role_head_coach}** role to <@${user.id}>. Check that my role is above it in **Server Settings → Roles**, or run \`/checkpermissions\`.`, flags: 64 });
+    }
     if (!config.role_head_coach_id) await saveConfig(guildId, { role_head_coach_id: hcRole.id });
   }
 
@@ -1436,11 +1477,33 @@ async function handleResetTeam(interaction) {
   await unassignTeam(team.id, guildId);
 
   const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+  let roleWarning = '';
   if (member && config.role_head_coach_id) {
-    await member.roles.remove(config.role_head_coach_id).catch(() => {});
+    try {
+      await member.roles.remove(config.role_head_coach_id);
+    } catch (roleErr) {
+      console.error('[roles] Failed to remove head coach role on resetteam:', roleErr.message);
+      roleWarning = `\n⚠️ Couldn't remove the **${config.role_head_coach}** role — check bot role hierarchy in **Server Settings → Roles**.`;
+    }
   }
 
-  await interaction.reply({ content: `✅ <@${user.id}> has been removed from **${team.team_name}**.` });
+  const signedChannel = findTextChannel(interaction.guild, config.channel_signed_coaches);
+  const newsChannel   = findTextChannel(interaction.guild, config.channel_news_feed);
+  const announceTarget = signedChannel || newsChannel;
+
+  const releaseEmbed = new EmbedBuilder()
+    .setTitle(`🚪 Coach Released — ${team.team_name}`)
+    .setColor(0xff4444)
+    .setDescription(`<@${user.id}> has been released from **${team.team_name}**.`)
+    .addFields(
+      { name: 'Coach', value: `<@${user.id}>`, inline: true },
+      { name: 'Team',  value: team.team_name,   inline: true },
+    )
+    .setTimestamp();
+
+  if (announceTarget) await announceTarget.send({ embeds: [releaseEmbed] }).catch(() => {});
+
+  await interaction.reply({ content: `✅ <@${user.id}> has been removed from **${team.team_name}**.${roleWarning}` });
 }
 
 // /listteams ──────────────────────────────────────────
@@ -1723,9 +1786,12 @@ async function handleMoveCoach(interaction) {
 
   await interaction.editReply({ embeds: [embed] });
 
-  const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
-  if (newsChannel && newsChannel.id !== interaction.channelId) {
-    await newsChannel.send({ embeds: [embed] });
+  // Post to signed-coaches (preferred) or news-feed
+  const signedChannel = findTextChannel(interaction.guild, config.channel_signed_coaches);
+  const newsChannel   = findTextChannel(interaction.guild, config.channel_news_feed);
+  const announceTarget = signedChannel || newsChannel;
+  if (announceTarget && announceTarget.id !== interaction.channelId) {
+    await announceTarget.send({ embeds: [embed] });
   }
 }
 
