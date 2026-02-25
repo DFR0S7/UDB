@@ -399,6 +399,42 @@ async function upsertRecord(record) {
 }
 
 // =====================================================
+// COACH STREAM HELPERS
+// =====================================================
+
+async function setCoachStream(guildId, userId, streamUrl) {
+  const platform = streamUrl.toLowerCase().includes('twitch') ? 'twitch' :
+                   streamUrl.toLowerCase().includes('youtube') ? 'youtube' : 'other';
+
+  await supabase.from('coach_streams').upsert({
+    guild_id: guildId,
+    user_id: userId,
+    stream_url: streamUrl.trim(),
+    platform: platform,
+    updated_at: new Date().toISOString()
+  }, { onConflict: 'guild_id,user_id' });
+}
+
+async function getCoachStream(guildId, userId) {
+  const { data } = await supabase
+    .from('coach_streams')
+    .select('stream_url')
+    .eq('guild_id', guildId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  return data?.stream_url || null;
+}
+
+async function getAllStreamers(guildId) {
+  const { data } = await supabase
+    .from('coach_streams')
+    .select('user_id, stream_url, platform')
+    .eq('guild_id', guildId)
+    .order('platform');
+  return data || [];
+}
+
+// =====================================================
 // STREAM REMINDER TRACKING
 // =====================================================
 function scheduleStreamReminder(channel, userId, guildId, minutes) {
@@ -524,6 +560,16 @@ function buildCommands() {
       .setDescription('Check if the bot has all required permissions (Admin only)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
+    new SlashCommandBuilder()
+      .setName('set-stream')
+      .setDescription('Set your personal streaming channel (Twitch/YouTube/etc)')
+      .addStringOption(o => o.setName('url').setDescription('Your stream URL or username').setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('list-streamers')
+      .setDescription('Show all coaches and their streaming channels (Admin only)')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    
   ].map(cmd => cmd.toJSON());
 }
 
@@ -912,6 +958,44 @@ async function handleSetup(interaction) {
     console.error('[setup] Error saving config:', err);
     await dm.send(`❌ Setup failed: ${err.message}`);
   }
+}
+
+// /set-stream
+async function handleSetStream(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const userId = interaction.user.id;
+  const url = interaction.options.getString('url');
+
+  await setCoachStream(guildId, userId, url);
+
+  await interaction.editReply({
+    content: `✅ Your streaming link has been saved: **${url}**\n\nAdmins can now see it with \`/list-streamers\`.`
+  });
+}
+
+// /list-streamers (Admin only)
+async function handleListStreamers(interaction) {
+  await interaction.deferReply({ flags: 64 });
+
+  if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+    return interaction.editReply({ content: "❌ Only admins can use this command." });
+  }
+
+  const streamers = await getAllStreamers(interaction.guildId);
+
+  if (streamers.length === 0) {
+    return interaction.editReply("No streamers have been set yet.");
+  }
+
+  let text = "**Coach Streaming List** (copy-paste ready for Wamellow)\n\n";
+  for (const s of streamers) {
+    const member = await interaction.guild.members.fetch(s.user_id).catch(() => null);
+    const name = member ? member.displayName : `<@${s.user_id}>`;
+    text += `• ${name} → ${s.stream_url}\n`;
+  }
+
+  await interaction.editReply({ content: text });
 }
 
 // /config view ────────────────────────────────────────
@@ -1804,7 +1888,6 @@ if (advanceChannel) {
   let mention = '';
   let mentionType = 'none';
 
-  // Step 1: Try to find the configured head coach role
   const headCoachRoleName = (config.role_head_coach || 'head coach').trim();
   const headCoachRole = interaction.guild.roles.cache.find(
     r => r.name.toLowerCase() === headCoachRoleName.toLowerCase()
@@ -1813,33 +1896,41 @@ if (advanceChannel) {
   if (headCoachRole) {
     mention = `<@&${headCoachRole.id}>`;
     mentionType = 'role';
-    console.log(`[advance] Mentioning head coach role: @${headCoachRole.name} in guild ${guildId}`);
   } else {
-    // Step 2: Fallback to @everyone
     mention = '@everyone';
     mentionType = 'everyone';
-    console.warn(
-      `[advance] Head coach role "${headCoachRoleName}" not found in guild ${guildId} — falling back to @everyone`
-    );
   }
 
-  // Build the message content
-  const content = `${mention} We have advanced to Week $$   {meta.week + 1}   $${
-  nextAdvanceMessage ? '\n' + nextAdvanceMessage : ''
-  }`;
+  // Helper to format deadline in different timezones
+  const formatTZ = (date, tz) =>
+    date.toLocaleString('en-US', {
+      timeZone: tz,
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    });
 
-  // Send mention + embed
+  const deadline = new Date(Date.now() + hours * 60 * 60 * 1000);
+
+  const content = `${mention} **Advance Complete!**\n` +
+                  `We are now in **Week ${meta.week + 1}** (Season ${meta.season})\n` +
+                  `Next advance available in **${hours} hours**:\n` +
+                  `🌴 ET: ${formatTZ(deadline, 'America/New_York')}\n` +
+                  `🌵 CT: ${formatTZ(deadline, 'America/Chicago')}\n` +
+                  `🏔️ MT: ${formatTZ(deadline, 'America/Denver')}\n` +
+                  `🌊 PT: ${formatTZ(deadline, 'America/Los_Angeles')}`;
+
   await advanceChannel.send({
     content,
-    embeds: [embed]   // your existing recap embed
+    embeds: [embed]
   });
 
-  // Optional: reply to admin with feedback
   await interaction.editReply(
     `✅ Advance posted in ${advanceChannel.name} with **${mentionType}** mention.`
   );
 } else {
-  // No advance channel configured → just reply with embed
   await interaction.editReply({ embeds: [embed] });
 }
 }
@@ -2229,6 +2320,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'advance':           return handleAdvance(interaction);
         case 'season-advance':    return handleSeasonAdvance(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
+        case 'set-stream':        return handleSetStream(interaction);
+        case 'list-streamers':    return handleListStreamers(interaction);
         case 'config':
           switch (interaction.options.getSubcommand()) {
             case 'view':     return handleConfigView(interaction);
@@ -2273,15 +2366,23 @@ client.on(Events.MessageCreate, async (message) => {
   const config = await getConfig(message.guildId).catch(() => null);
   if (!config?.feature_stream_reminders) return;
 
-  // Only watch the configured streaming channel
   if (message.channel.name?.toLowerCase() !== config.channel_streaming?.toLowerCase()) return;
 
-  // Detect YouTube / Twitch links (robust regex)
   const streamRegex = /https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be|twitch\.tv)\/[^\s<>"')]+/i;
   if (!streamRegex.test(message.content)) return;
 
   const minutes = config.stream_reminder_minutes || 45;
-  scheduleStreamReminder(message.channel, message.author.id, message.guildId, minutes);
+
+  // Try to find the correct coach (even if someone else posted the link)
+  let targetUserId = message.author.id;
+  const savedStream = await getCoachStream(message.guildId, message.author.id);
+  
+  if (!savedStream) {
+    // Optional: also check if the posted link belongs to a known coach
+    // (advanced, can be added later)
+  }
+
+  scheduleStreamReminder(message.channel, targetUserId, message.guildId, minutes);
 });
 
 // =====================================================
