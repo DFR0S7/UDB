@@ -54,6 +54,24 @@ const client = new Client({
 });
 
 // =====================================================
+// PHASE CYCLE — universal, fixed league progression
+// =====================================================
+const PHASE_CYCLE = [
+  { key: 'preseason',             name: 'Preseason',                  subWeeks: 1, format: () => 'Preseason' },
+  { key: 'regular',               name: 'Regular Season',             subWeeks: 16, format: (sub) => `Week ${sub}` }, // Week 0–15
+  { key: 'conf_champ',            name: 'Conference Championship',    subWeeks: 1, format: () => 'Conference Championship' },
+  { key: 'bowl',                  name: 'Bowl Season',                 subWeeks: 4, format: (sub) => `Bowl Week ${sub}` },
+  { key: 'players_leaving',       name: 'Players Leaving',            subWeeks: 1, format: () => 'Players Leaving' },
+  { key: 'transfer_portal',       name: 'Transfer Portal',            subWeeks: 4, format: (sub) => `Transfer Week ${sub}` },
+  { key: 'position_changes',      name: 'Position Changes',           subWeeks: 1, format: () => 'Position Changes' },
+  { key: 'training_results',      name: 'Training Results',           subWeeks: 1, format: () => 'Training Results' },
+  { key: 'encourage_transfers',   name: 'Encourage Transfers',        subWeeks: 1, format: () => 'Encourage Transfers' },
+];
+
+// Quick lookup helper
+const getPhaseByKey = (key) => PHASE_CYCLE.find(p => p.key === key) || PHASE_CYCLE[0];
+
+// =====================================================
 // HEALTH SERVER (always on for Render)
 // =====================================================
 http.createServer((req, res) => {
@@ -341,8 +359,22 @@ async function unassignTeam(teamId, guildId) {
 }
 
 async function getMeta(guildId) {
-  const { data } = await supabase.from('meta').select('*').eq('guild_id', guildId).single();
-  return data || { season: 1, week: 1, advance_hours: 24, advance_deadline: null };
+  const { data } = await supabase
+    .from('meta')
+    .select('season, week, advance_hours, advance_deadline, current_phase, current_sub_phase, last_advance_at, next_advance_deadline')
+    .eq('guild_id', guildId)
+    .single();
+  
+  return data || {
+    season: 1,
+    week: 0,                    // you might still have this old field
+    current_phase: 'preseason',
+    current_sub_phase: 0,
+    advance_hours: 24,
+    advance_deadline: null,
+    last_advance_at: null,
+    next_advance_deadline: null
+  };
 }
 
 async function setMeta(guildId, updates) {
@@ -2262,7 +2294,13 @@ async function initGuild(guild) {
     }
 
     await createDefaultConfig(guild.id, guild.name);
-    await supabase.from('meta').upsert({ guild_id: guild.id, season: 1, week: 1 }, { onConflict: 'guild_id' });
+    await supabase.from('meta').upsert({
+  guild_id: guildId,
+  season: newSeason,
+  current_phase: newPhase,
+  current_sub_phase: newSub,
+  last_advance_at: new Date().toISOString(),
+  next_advance_deadline: nextDeadline.toISOString(), { onConflict: 'guild_id' });
     console.log(`[guild] Auto-created config for: ${guild.name} (${guild.id})`);
 
     const owner = await guild.fetchOwner().catch(() => null);
