@@ -1935,14 +1935,14 @@ if (advanceChannel) {
   );
 
   if (headCoachRole) {
-    mention = `<@&${headCoachRole.id}>`;
+    mention = `<@&${headCoachRole.id}> `;
     mentionType = 'role';
   } else {
-    mention = '@everyone';
+    mention = '@everyone ';
     mentionType = 'everyone';
   }
 
-  // Helper to format deadline in different timezones
+  // Helper for timezone formatting
   const formatTZ = (date, tz) =>
     date.toLocaleString('en-US', {
       timeZone: tz,
@@ -1955,14 +1955,17 @@ if (advanceChannel) {
 
   const deadline = new Date(Date.now() + hours * 60 * 60 * 1000);
 
-  const content = `${mention} **Advance Complete!**\n` +
+  // Single clean message
+  const content = `${mention}**Advance Complete!**\n` +
                   `We are now in **Week ${meta.week + 1}** (Season ${meta.season})\n` +
-                  `Next advance available in **${hours} hours**:\n` +
+                  `All games must be completed within **${hours} hours**.\n\n` +
+                  `**Deadline:**\n` +
                   `🌴 ET: ${formatTZ(deadline, 'America/New_York')}\n` +
                   `🌵 CT: ${formatTZ(deadline, 'America/Chicago')}\n` +
                   `🏔️ MT: ${formatTZ(deadline, 'America/Denver')}\n` +
                   `🌊 PT: ${formatTZ(deadline, 'America/Los_Angeles')}`;
 
+  // Send ONE message: content + embed (recap)
   await advanceChannel.send({
     content,
     embeds: [embed]
@@ -1973,8 +1976,7 @@ if (advanceChannel) {
   );
 } else {
   await interaction.editReply({ embeds: [embed] });
-}
-}
+}}
 
 // /season-advance ─────────────────────────────────────
 async function handleSeasonAdvance(interaction) {
