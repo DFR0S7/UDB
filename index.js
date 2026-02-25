@@ -1657,12 +1657,24 @@ async function handleListTeams(interaction) {
   const listsChannel = findTextChannel(interaction.guild, config.channel_team_lists);
   const target = listsChannel || interaction.channel;
 
-  // Clean old bot messages in the channel (up to last 100)
-  try {
-    const messages = await target.messages.fetch({ limit: 100 });
-    const botMsgs  = messages.filter(m => m.author.id === client.user.id);
-    for (const m of botMsgs.values()) await m.delete().catch(() => {});
-  } catch { /* ignore cleanup errors */ }
+  // Check bot has permission to send messages in the target channel
+  const botMember = interaction.guild.members.cache.get(client.user.id);
+  const perms = target.permissionsFor(botMember);
+
+  if (!perms?.has('SendMessages')) {
+    return interaction.editReply(
+      `❌ I don't have permission to post in ${target}. Please give the bot **Send Messages** and **Embed Links** permissions in that channel.`
+    );
+  }
+
+  // Clean old bot messages in the channel (up to last 100) — skip if no permission
+  if (perms.has('ManageMessages')) {
+    try {
+      const messages = await target.messages.fetch({ limit: 100 });
+      const botMsgs  = messages.filter(m => m.author.id === client.user.id);
+      for (const m of botMsgs.values()) await m.delete().catch(() => {});
+    } catch { /* ignore cleanup errors */ }
+  }
 
   // Post all embeds
   for (const embed of embeds) {
