@@ -879,6 +879,7 @@ async function handleSetup(interaction) {
 
 // /config view ────────────────────────────────────────
 async function handleConfigView(interaction) {
+  await interaction.deferReply({ flags: 64 });
   const config = await getConfig(interaction.guildId);
   const embed = new EmbedBuilder()
     .setTitle(`⚙️ ${config.league_name} — Bot Configuration`)
@@ -911,11 +912,12 @@ async function handleConfigView(interaction) {
         `Advance Intervals: \`${config.advance_intervals}\``,
         inline: true },
     );
-  await interaction.reply({ embeds: [embed], flags: 64 });
+  await interaction.editReply({ embeds: [embed] });
 }
 
 // /config features ────────────────────────────────────
 async function handleConfigFeatures(interaction) {
+  await interaction.deferReply({ flags: 64 });
   const config = await getConfig(interaction.guildId);
   const row = new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
@@ -931,14 +933,15 @@ async function handleConfigFeatures(interaction) {
         { label: 'Rankings',         value: 'feature_rankings',         description: 'Enable/disable rankings',            default: config.feature_rankings },
       ])
   );
-  await interaction.reply({
+  await interaction.editReply({
     content: '**Feature Toggles** — Select the features you want **ENABLED** (deselect to disable):',
-    components: [row], flags: 64,
+    components: [row],
   });
 }
 
 // /config edit ────────────────────────────────────────
 async function handleConfigEdit(interaction) {
+  await interaction.deferReply({ flags: 64 });
   const setting = interaction.options.getString('setting');
   const value   = interaction.options.getString('value');
   const allowed = [
@@ -949,37 +952,39 @@ async function handleConfigEdit(interaction) {
     'embed_color_primary', 'embed_color_win', 'embed_color_loss',
   ];
   if (!allowed.includes(setting)) {
-    return interaction.reply({ content: `❌ **Unknown Setting: \`${setting}\`**\nUse the autocomplete dropdown when typing the setting name, or run \`/config view\` to see all available settings.`, flags: 64 });
+    return interaction.editReply({ content: `❌ **Unknown Setting: \`${setting}\`**\nUse the autocomplete dropdown when typing the setting name, or run \`/config view\` to see all available settings.` });
   }
   try {
     await saveConfig(interaction.guildId, { [setting]: value });
-    await interaction.reply({ content: `✅ Updated **${setting}** to \`${value}\``, flags: 64 });
+    await interaction.editReply({ content: `✅ Updated **${setting}** to \`${value}\`` });
   } catch (err) {
-    await interaction.reply({ content: `❌ **Failed to Save Setting**\nDatabase error: ${err.message}\n\nTry running \`/config reload\` then attempt the edit again. If this keeps happening, check your Supabase connection.`, flags: 64 });
+    await interaction.editReply({ content: `❌ **Failed to Save Setting**\nDatabase error: ${err.message}\n\nTry running \`/config reload\` then attempt the edit again. If this keeps happening, check your Supabase connection.` });
   }
 }
 
 // /config reload ──────────────────────────────────────
 async function handleConfigReload(interaction) {
+  await interaction.deferReply({ flags: 64 });
   guildConfigs.delete(interaction.guildId);
   const config = await loadGuildConfig(interaction.guildId);
-  await interaction.reply({ content: `✅ Config reloaded for **${config.league_name}**!`, flags: 64 });
+  await interaction.editReply({ content: `✅ Config reloaded for **${config.league_name}**!` });
 }
 
 // /joboffers ──────────────────────────────────────────
 async function handleJobOffers(interaction) {
   const guildId = interaction.guildId;
   const userId  = interaction.user.id;
+  await interaction.deferReply({ flags: 64 });
   const config  = await getConfig(guildId);
 
   if (!config.feature_job_offers) {
-    return interaction.reply({ content: '❌ **Job Offers Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 });
+    return interaction.editReply({ content: '❌ **Job Offers Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
   }
 
   const currentTeam = await getTeamByUser(userId, guildId);
   if (currentTeam) {
-    return interaction.reply({
-      content: `❌ **Already Assigned**\nYou are already the head coach of **${currentTeam.team_name}**. Job offers are only available to coaches without a team.\n\nIf this is a mistake, ask an admin to run \`/resetteam\` to remove your current assignment.`, flags: 64,
+    return interaction.editReply({
+      content: `❌ **Already Assigned**\nYou are already the head coach of **${currentTeam.team_name}**. Job offers are only available to coaches without a team.\n\nIf this is a mistake, ask an admin to run \`/resetteam\` to remove your current assignment.`,
     });
   }
 
@@ -1019,8 +1024,8 @@ async function handleJobOffers(interaction) {
   const pool = (availableJobs || []).filter(t => !assigned.includes(t.id) && !locked.includes(t.id));
 
   if (pool.length === 0) {
-    return interaction.reply({
-      content: `❌ **No Available Teams**\nThere are no unassigned teams with a **${config.star_rating_for_offers}⭐ or higher** rating right now.\n\nPossible reasons:\n• All eligible teams are taken\n• All eligible teams are locked in active offers\n• The star rating range in config is too narrow\n\nAn admin can adjust the range with \`/config edit\`.`, flags: 64,
+    return interaction.editReply({
+      content: `❌ **No Available Teams**\nThere are no unassigned teams with a **${config.star_rating_for_offers}⭐ or higher** rating right now.\n\nPossible reasons:\n• All eligible teams are taken\n• All eligible teams are locked in active offers\n• The star rating range in config is too narrow\n\nAn admin can adjust the range with \`/config edit\`.`,
     });
   }
 
@@ -1069,9 +1074,9 @@ async function sendOffersAsDM(interaction, offers, config, guildId, isExisting) 
   try {
     const dm = await interaction.user.createDM();
     await dm.send({ embeds: [embed], components: rows });
-    await interaction.reply({ content: '📬 Your job offers have been sent to your DMs!', flags: 64 });
+    await interaction.editReply({ content: '📬 Your job offers have been sent to your DMs!' });
   } catch {
-    await interaction.reply({ embeds: [embed], components: rows, flags: 64 });
+    await interaction.editReply({ embeds: [embed], components: rows });
   }
 }
 
@@ -1201,6 +1206,7 @@ async function expireJobOffers() {
 
 // /game-result ────────────────────────────────────────
 async function handleGameResult(interaction) {
+  await interaction.deferReply();
   const guildId      = interaction.guildId;
   const config       = await getConfig(guildId);
   const meta         = await getMeta(guildId);
@@ -1214,19 +1220,19 @@ async function handleGameResult(interaction) {
   try {
     yourTeam = await getTeamByUser(userId, guildId);
   } catch (err) {
-    return interaction.reply({ content: `❌ **Database Error**\nCouldn't load your team: ${err.message}\n\nTry again in a moment. If this persists, check your Supabase connection.`, flags: 64 });
+    return interaction.editReply({ content: `❌ **Database Error**\nCouldn't load your team: ${err.message}\n\nTry again in a moment. If this persists, check your Supabase connection.` });
   }
   if (!yourTeam) {
-    return interaction.reply({ content: "❌ **No Team Assigned**\nYou don't have a team yet. Use `/joboffers` to receive coaching offers, or ask an admin to assign you a team with `/assign-team`.", flags: 64 });
+    return interaction.editReply({ content: "❌ **No Team Assigned**\nYou don't have a team yet. Use `/joboffers` to receive coaching offers, or ask an admin to assign you a team with `/assign-team`." });
   }
 
   try {
     oppTeam = await getTeamByName(opponentName, guildId);
   } catch (err) {
-    return interaction.reply({ content: `❌ **Database Error**\nCouldn't look up opponent "${opponentName}": ${err.message}`, flags: 64 });
+    return interaction.editReply({ content: `❌ **Database Error**\nCouldn't look up opponent "${opponentName}": ${err.message}` });
   }
   if (!oppTeam) {
-    return interaction.reply({ content: `❌ **Opponent Not Found: \`${opponentName}\`**\nNo team with that name exists in the database. Make sure you selected from the autocomplete dropdown — partial or misspelled names won't match.`, flags: 64 });
+    return interaction.editReply({ content: `❌ **Opponent Not Found: \`${opponentName}\`**\nNo team with that name exists in the database. Make sure you selected from the autocomplete dropdown — partial or misspelled names won't match.` });
   }
 
   const won  = yourScore > oppScore;
@@ -1268,7 +1274,7 @@ async function handleGameResult(interaction) {
 
   if (summary) embed.addFields({ name: '📝 Game Summary', value: summary, inline: false });
 
-  await interaction.reply({ embeds: [embed] });
+  await interaction.editReply({ embeds: [embed] });
 
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
   if (newsChannel && newsChannel.id !== interaction.channelId) {
@@ -1278,6 +1284,7 @@ async function handleGameResult(interaction) {
 
 // /any-game-result ────────────────────────────────────
 async function handleAnyGameResult(interaction) {
+  await interaction.deferReply();
   const guildId   = interaction.guildId;
   const config    = await getConfig(guildId);
   const meta      = await getMeta(guildId);
@@ -1289,20 +1296,19 @@ async function handleAnyGameResult(interaction) {
   const week      = weekInput || meta.week;
 
   if (weekInput && (weekInput < 1 || weekInput > meta.week)) {
-    return interaction.reply({
+    return interaction.editReply({
       content: `❌ **Invalid Week**\nWeek **${weekInput}** is out of range. The current season is on Week **${meta.week}** — enter a week between 1 and ${meta.week}.`,
-      flags: 64,
     });
   }
 
   let team1, team2;
   try { team1 = await getTeamByName(team1Name, guildId); }
-  catch (err) { return interaction.reply({ content: `❌ **Database Error**\nCouldn't look up "${team1Name}": ${err.message}`, flags: 64 }); }
+  catch (err) { return interaction.editReply({ content: `❌ **Database Error**\nCouldn't look up "${team1Name}": ${err.message}` }); }
   try { team2 = await getTeamByName(team2Name, guildId); }
-  catch (err) { return interaction.reply({ content: `❌ **Database Error**\nCouldn't look up "${team2Name}": ${err.message}`, flags: 64 }); }
+  catch (err) { return interaction.editReply({ content: `❌ **Database Error**\nCouldn't look up "${team2Name}": ${err.message}` }); }
 
-  if (!team1) return interaction.reply({ content: `❌ **Team Not Found: \`${team1Name}\`**\nNo team with that name exists in the database. Use the autocomplete dropdown to select teams.`, flags: 64 });
-  if (!team2) return interaction.reply({ content: `❌ **Team Not Found: \`${team2Name}\`**\nNo team with that name exists in the database. Use the autocomplete dropdown to select teams.`, flags: 64 });
+  if (!team1) return interaction.editReply({ content: `❌ **Team Not Found: \`${team1Name}\`**\nNo team with that name exists in the database. Use the autocomplete dropdown to select teams.` });
+  if (!team2) return interaction.editReply({ content: `❌ **Team Not Found: \`${team2Name}\`**\nNo team with that name exists in the database. Use the autocomplete dropdown to select teams.` });
 
   const record1 = await getRecord(team1.id, meta.season, guildId);
   const record2 = await getRecord(team2.id, meta.season, guildId);
@@ -1335,7 +1341,7 @@ async function handleAnyGameResult(interaction) {
     )
     .setFooter({ text: `Entered by ${interaction.user.displayName} (admin)${weekInput && weekInput !== meta.week ? ` · Backfilled to Week ${week}` : ''}` });
 
-  await interaction.reply({ embeds: [embed] });
+  await interaction.editReply({ embeds: [embed] });
 
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
   if (newsChannel && newsChannel.id !== interaction.channelId) {
@@ -1345,9 +1351,10 @@ async function handleAnyGameResult(interaction) {
 
 // /press-release ──────────────────────────────────────
 async function handlePressRelease(interaction) {
+  await interaction.deferReply({ flags: 64 });
   const config = await getConfig(interaction.guildId);
   if (!config.feature_press_releases) {
-    return interaction.reply({ content: '❌ **Press Releases Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 });
+    return interaction.editReply({ content: '❌ **Press Releases Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
   }
 
   const message  = interaction.options.getString('message');
@@ -1356,7 +1363,7 @@ async function handlePressRelease(interaction) {
 
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
   if (!newsChannel) {
-    return interaction.reply({ content: `❌ **News Feed Channel Not Found**\nThe configured channel \`#${config.channel_news_feed}\` doesn't exist in this server.\n\nAn admin can fix this with \`/config edit\` → **News Feed Channel**, or run \`/checkpermissions\` to audit all channels.`, flags: 64 });
+    return interaction.editReply({ content: `❌ **News Feed Channel Not Found**\nThe configured channel \`#${config.channel_news_feed}\` doesn't exist in this server.\n\nAn admin can fix this with \`/config edit\` → **News Feed Channel**, or run \`/checkpermissions\` to audit all channels.` });
   }
 
   const embed = new EmbedBuilder()
@@ -1370,14 +1377,15 @@ async function handlePressRelease(interaction) {
   await supabase.from('news_feed').insert({
     guild_id: interaction.guildId, author_id: interaction.user.id, team_name: teamName, message,
   });
-  await interaction.reply({ content: '✅ Press release posted!', flags: 64 });
+  await interaction.editReply({ content: '✅ Press release posted!' });
 }
 
 // /ranking ────────────────────────────────────────────
 async function handleRanking(interaction) {
+  await interaction.deferReply({ flags: 64 });
   const config = await getConfig(interaction.guildId);
   if (!config.feature_rankings) {
-    return interaction.reply({ content: '❌ **Rankings Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 });
+    return interaction.editReply({ content: '❌ **Rankings Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
   }
 
   const meta = await getMeta(interaction.guildId);
@@ -1389,7 +1397,7 @@ async function handleRanking(interaction) {
     .order('wins', { ascending: false });
 
   if (!records || records.length === 0) {
-    return interaction.reply({ content: '❌ **No Records Yet**\nNo game results have been submitted for this season. Records will appear here once coaches start submitting results with `/game-result`.', flags: 64 });
+    return interaction.editReply({ content: '❌ **No Records Yet**\nNo game results have been submitted for this season. Records will appear here once coaches start submitting results with `/game-result`.' });
   }
 
   const lines = records.map((r, i) =>
@@ -1405,14 +1413,15 @@ async function handleRanking(interaction) {
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
   if (newsChannel && newsChannel.id !== interaction.channelId) {
     await newsChannel.send({ embeds: [embed] });
-    await interaction.reply({ content: `✅ Standings posted in ${newsChannel}!`, flags: 64 });
+    await interaction.editReply({ content: `✅ Standings posted in ${newsChannel}!` });
   } else {
-    await interaction.reply({ embeds: [embed] });
+    await interaction.editReply({ embeds: [embed] });
   }
 }
 
 // /ranking-all-time ───────────────────────────────────
 async function handleRankingAllTime(interaction) {
+  await interaction.deferReply({ flags: 64 });
   const config = await getConfig(interaction.guildId);
 
   const { data: records } = await supabase
@@ -1421,7 +1430,7 @@ async function handleRankingAllTime(interaction) {
     .eq('guild_id', interaction.guildId);
 
   if (!records || records.length === 0) {
-    return interaction.reply({ content: 'No records found.', flags: 64 });
+    return interaction.editReply({ content: '❌ **No Records Found**\nNo game results exist yet. Records will appear here once coaches submit results with `/game-result`.' });
   }
 
   const totals = {};
@@ -1449,9 +1458,9 @@ async function handleRankingAllTime(interaction) {
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
   if (newsChannel && newsChannel.id !== interaction.channelId) {
     await newsChannel.send({ embeds: [embed] });
-    await interaction.reply({ content: `✅ All-time rankings posted in ${newsChannel}!`, flags: 64 });
+    await interaction.editReply({ content: `✅ All-time rankings posted in ${newsChannel}!` });
   } else {
-    await interaction.reply({ embeds: [embed] });
+    await interaction.editReply({ embeds: [embed] });
   }
 }
 
@@ -1513,13 +1522,14 @@ async function handleAssignTeam(interaction) {
 
 // /resetteam ──────────────────────────────────────────
 async function handleResetTeam(interaction) {
+  await interaction.deferReply();
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
   const user    = interaction.options.getUser('user');
 
   const team = await getTeamByUser(user.id, guildId);
   if (!team) {
-    return interaction.reply({ content: `❌ **No Team Found**\n<@${user.id}> doesn't have a team assigned in this league. Nothing to reset.`, flags: 64 });
+    return interaction.editReply({ content: `❌ **No Team Found**\n<@${user.id}> doesn't have a team assigned in this league. Nothing to reset.` });
   }
 
   await unassignTeam(team.id, guildId);
@@ -1551,7 +1561,7 @@ async function handleResetTeam(interaction) {
 
   if (announceTarget) await announceTarget.send({ embeds: [releaseEmbed] }).catch(() => {});
 
-  await interaction.reply({ content: `✅ <@${user.id}> has been removed from **${team.team_name}**.${roleWarning}` });
+  await interaction.editReply({ content: `✅ <@${user.id}> has been removed from **${team.team_name}**.${roleWarning}` });
 }
 
 // /listteams ──────────────────────────────────────────
@@ -1700,7 +1710,7 @@ async function handleAdvance(interaction) {
   const config  = await loadGuildConfig(guildId);
 
   if (!config.feature_advance_system) {
-    return interaction.reply({ content: '❌ **Advance System Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 });
+    return interaction.reply({ content: '❌ **Advance System Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 }); // no defer yet, safe to reply
   }
 
   const meta      = await getMeta(guildId);
@@ -1779,6 +1789,7 @@ async function handleAdvanceConfirm(interaction) {
 
 // /season-advance ─────────────────────────────────────
 async function handleSeasonAdvance(interaction) {
+  await interaction.deferReply({ flags: 64 });
   const guildId   = interaction.guildId;
   const config    = await getConfig(guildId);
   const meta      = await getMeta(guildId);
@@ -1795,9 +1806,9 @@ async function handleSeasonAdvance(interaction) {
   const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
   if (advanceChannel) {
     await advanceChannel.send({ embeds: [embed] });
-    await interaction.reply({ content: `✅ Season advance posted in ${advanceChannel}!`, flags: 64 });
+    await interaction.editReply({ content: `✅ Season advance posted in ${advanceChannel}!` });
   } else {
-    await interaction.reply({ embeds: [embed] });
+    await interaction.editReply({ embeds: [embed] });
   }
 
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
