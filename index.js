@@ -1875,64 +1875,76 @@ async function postWeeklyRecap(guild, guildId, config, meta) {
 async function handleAdvance(interaction) {
   await interaction.deferReply({ flags: 64 });
   const guildId = interaction.guildId;
-
-  // Always load fresh config so interval changes take effect immediately
   guildConfigs.delete(guildId);
   const config = await loadGuildConfig(guildId);
 
   if (!config.feature_advance_system) {
-    return interaction.editReply({ content: '❌ **Advance System Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
+    return interaction.editReply({ content: '❌ **Advance System Disabled**' });
   }
 
-  const hoursStr   = interaction.options.getString('hours');
-  const hours      = parseInt(hoursStr);
-  const intervals  = config.advance_intervals_parsed || [24, 48];
-
+  const hoursStr = interaction.options.getString('hours');
+  const hours = parseInt(hoursStr);
+  const intervals = config.advance_intervals_parsed || [24, 48];
   if (isNaN(hours) || !intervals.includes(hours)) {
-    return interaction.editReply({
-      content:
-        `❌ **Invalid Option: \`${hoursStr}\`**\n` +
-        `Please select one of the available options from the dropdown.\n` +
-        `Configured intervals: ${intervals.map(h => h + 'h').join(', ')}`,
-    });
+    return interaction.editReply({ content: `❌ Invalid interval: ${hoursStr}. Choose from: ${intervals.join(', ')}` });
   }
 
-  const meta     = await getMeta(guildId);
+  const meta = await getMeta(guildId);
+
+  // ── Phase advancing logic ───────────────────────────────────────
+  let currentPhase = meta.current_phase || 'preseason';
+  let currentSub = meta.current_sub_phase || 0;
+  let season = meta.season || 1;
+
+  const phaseDef = getPhaseByKey(currentPhase);
+  if (!phaseDef) {
+    currentPhase = 'preseason';
+    currentSub = 0;
+  }
+
+  let newPhase = currentPhase;
+  let newSub = currentSub + 1;
+  let newSeason = season;
+
+  // If we've reached the end of this phase → move to next
+  if (newSub >= phaseDef.subWeeks) {
+    const idx = PHASE_CYCLE.findIndex(p => p.key === currentPhase);
+    const nextIdx = (idx + 1) % PHASE_CYCLE.length;
+    newPhase = PHASE_CYCLE[nextIdx].key;
+    newSub = 0;
+
+    // Looped back to preseason? → new season
+    if (newPhase === 'preseason') {
+      newSeason = season + 1;
+    }
+  }
+
+  const nextPhaseDef = getPhaseByKey(newPhase);
+  const phaseDisplay = nextPhaseDef.format ? nextPhaseDef.format(newSub) : nextPhaseDef.name;
+
+  // Calculate deadline
   const deadline = new Date(Date.now() + hours * 60 * 60 * 1000);
 
+  // Save everything
+  await setMeta(guildId, {
+    season: newSeason,
+    current_phase: newPhase,
+    current_sub_phase: newSub,
+    advance_hours: hours,
+    advance_deadline: deadline.toISOString(),
+    last_advance_at: new Date().toISOString(),
+    // If you still want to keep the old week field for compatibility:
+    week: newPhase === 'regular' ? newSub : 0
+  });
+
+  // ── Build announcement ──────────────────────────────────────────
   const formatTZ = (date, tz) =>
     date.toLocaleString('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
 
-  const embed = new EmbedBuilder()
-    .setTitle(`⏭️ Advance — Season ${meta.season} Week ${meta.week + 1}`)
-    .setColor(config.embed_color_primary_int)
-    .setDescription(`The league is advancing to **Week ${meta.week + 1}**!\nAll games must be completed within **${hours} hours**.`)
-    .addFields({
-      name: '🕐 Deadline',
-      value:
-        `🌴 ET: **${formatTZ(deadline, 'America/New_York')}**\n` +
-        `🌵 CT: **${formatTZ(deadline, 'America/Chicago')}**\n` +
-        `🏔️ MT: **${formatTZ(deadline, 'America/Denver')}**\n` +
-        `🌊 PT: **${formatTZ(deadline, 'America/Los_Angeles')}**`,
-      inline: false,
-    })
-    .setTimestamp();
-
-  // Post recap for the week being closed, then bump the week counter
-  await postWeeklyRecap(interaction.guild, guildId, config, meta);
-  await setMeta(guildId, { week: meta.week + 1, advance_hours: hours, advance_deadline: deadline.toISOString() });
-
-  // Post publicly to advance-tracker channel
-  const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
-
-if (advanceChannel) {
   let mention = '';
   let mentionType = 'none';
-
   const headCoachRoleName = (config.role_head_coach || 'head coach').trim();
-  const headCoachRole = interaction.guild.roles.cache.find(
-    r => r.name.toLowerCase() === headCoachRoleName.toLowerCase()
-  );
+  const headCoachRole = interaction.guild.roles.cache.find(r => r.name.toLowerCase() === headCoachRoleName.toLowerCase());
 
   if (headCoachRole) {
     mention = `<@&${headCoachRole.id}> `;
@@ -1942,70 +1954,84 @@ if (advanceChannel) {
     mentionType = 'everyone';
   }
 
-  // Helper for timezone formatting
-  const formatTZ = (date, tz) =>
-    date.toLocaleString('en-US', {
-      timeZone: tz,
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true
-    });
-
-  const deadline = new Date(Date.now() + hours * 60 * 60 * 1000);
-
-  // Single clean message
   const content = `${mention}**Advance Complete!**\n` +
-                  `We are now in **Week ${meta.week + 1}** (Season ${meta.season})\n` +
-                  `All games must be completed within **${hours} hours**.\n\n` +
-                  `**Deadline:**\n` +
+                  `We are now in **${phaseDisplay}** (Season ${newSeason})\n` +
+                  `Next advance available in **${hours} hours**:\n` +
                   `🌴 ET: ${formatTZ(deadline, 'America/New_York')}\n` +
                   `🌵 CT: ${formatTZ(deadline, 'America/Chicago')}\n` +
                   `🏔️ MT: ${formatTZ(deadline, 'America/Denver')}\n` +
                   `🌊 PT: ${formatTZ(deadline, 'America/Los_Angeles')}`;
 
-  // Send ONE message: content + embed (recap)
-  await advanceChannel.send({
-    content,
-    embeds: [embed]
-  });
+  // Recap embed (your existing function)
+  await postWeeklyRecap(interaction.guild, guildId, config, meta);
 
-  await interaction.editReply(
-    `✅ Advance posted in ${advanceChannel.name} with **${mentionType}** mention.`
-  );
-} else {
-  await interaction.editReply({ embeds: [embed] });
-}}
-
+  const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
+  if (advanceChannel) {
+    await advanceChannel.send({ content, embeds: [embed] });
+    await interaction.editReply(`✅ Advance posted in ${advanceChannel.name} with **${mentionType}** mention.`);
+  } else {
+    await interaction.editReply({ content, embeds: [embed] });
+  }
+}
 // /season-advance ─────────────────────────────────────
 async function handleSeasonAdvance(interaction) {
   await interaction.deferReply({ flags: 64 });
-  const guildId   = interaction.guildId;
-  const config    = await getConfig(guildId);
-  const meta      = await getMeta(guildId);
+  const guildId = interaction.guildId;
+  const config = await getConfig(guildId);
+  const meta = await getMeta(guildId);
+
   const newSeason = meta.season + 1;
 
-  await setMeta(guildId, { season: newSeason, week: 1, advance_deadline: null });
+  // Fully reset to the start of the cycle
+  await setMeta(guildId, {
+    season: newSeason,
+    current_phase: 'preseason',
+    current_sub_phase: 0,
+    week: 0,                     // if still using old week field
+    advance_deadline: null,
+    last_advance_at: new Date().toISOString(),
+    // Add any other resets you want, e.g.:
+    // advance_hours: config.advance_intervals_parsed[0] || 24,
+  });
 
   const embed = new EmbedBuilder()
     .setTitle(`🏆 Season ${newSeason} Has Begun!`)
     .setColor(config.embed_color_primary_int)
-    .setDescription(`Season **${meta.season}** is over! Welcome to **Season ${newSeason}**!\nAll records reset. Good luck!`)
+    .setDescription(
+      `Season **${meta.season}** is over!\n` +
+      `Welcome to **Season ${newSeason}** — now in **Preseason**!\n` +
+      `All records have been archived. Good luck coaches!`
+    )
     .setTimestamp();
 
   const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
   if (advanceChannel) {
-    await advanceChannel.send({ embeds: [embed] });
-    await interaction.editReply({ content: `✅ Season advance posted in ${advanceChannel}!` });
+    let mention = '';
+    const hcRoleName = (config.role_head_coach || 'head coach').trim();
+    const hcRole = interaction.guild.roles.cache.find(r => r.name.toLowerCase() === hcRoleName.toLowerCase());
+
+    if (hcRole) {
+      mention = `<@&${hcRole.id}> `;
+    } else {
+      mention = '@everyone ';
+    }
+
+    await advanceChannel.send({
+      content: `${mention}Season ${newSeason} is here!`,
+      embeds: [embed]
+    });
+
+    await interaction.editReply(`✅ Season advance posted in ${advanceChannel.name}!`);
   } else {
     await interaction.editReply({ embeds: [embed] });
   }
 
+  // Also post to news-feed (optional but recommended)
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
-  if (newsChannel) await newsChannel.send({ embeds: [embed] });
+  if (newsChannel && newsChannel.id !== advanceChannel?.id) {
+    await newsChannel.send({ embeds: [embed] });
+  }
 }
-
 // /move-coach ─────────────────────────────────────────
 async function handleMoveCoach(interaction) {
   const guildId     = interaction.guildId;
