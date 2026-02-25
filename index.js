@@ -246,41 +246,75 @@ async function postToChannel(guild, channelName, payload) {
 // SUPABASE HELPERS
 // =====================================================
 async function getTeamByUser(userId, guildId) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('team_assignments')
     .select('*, teams(*)')
     .eq('user_id', userId)
     .eq('guild_id', guildId)
-    .single();
-  return data ? { ...data.teams, user_id: data.user_id, assignment_id: data.id } : null;
+    .maybeSingle();
+
+  if (error) {
+    console.error(`[db] getTeamByUser(${userId}, ${guildId}) error:`, error.message);
+    throw new Error(`Database error looking up your team: ${error.message}`);
+  }
+  if (!data) return null;
+  if (!data.teams) {
+    console.warn(`[db] getTeamByUser: assignment found but teams join returned null for user ${userId} — orphaned assignment row?`);
+    return null;
+  }
+  return { ...data.teams, user_id: data.user_id, assignment_id: data.id };
 }
 
 async function getTeamByName(teamName, guildId) {
-  const { data: team } = await supabase
+  // Use maybeSingle() so Supabase returns null instead of throwing on 0 rows
+  const { data: team, error: teamErr } = await supabase
     .from('teams')
     .select('*')
-    .ilike('team_name', teamName)
-    .single();
+    .ilike('team_name', teamName.trim())
+    .maybeSingle();
+
+  if (teamErr) {
+    console.error(`[db] getTeamByName("${teamName}") teams query error:`, teamErr.message);
+    throw new Error(`Database error looking up team "${teamName}": ${teamErr.message}`);
+  }
   if (!team) return null;
 
-  const { data: assignment } = await supabase
+  const { data: assignment, error: assignErr } = await supabase
     .from('team_assignments')
     .select('*')
     .eq('team_id', team.id)
     .eq('guild_id', guildId)
-    .single();
+    .maybeSingle();
+
+  if (assignErr) {
+    console.error(`[db] getTeamByName("${teamName}") assignments query error:`, assignErr.message);
+    // Non-fatal — team exists, just no assignment info
+  }
 
   return { ...team, user_id: assignment?.user_id || null, assignment_id: assignment?.id || null };
 }
 
 async function getAllTeams(guildId) {
-  const { data: teams } = await supabase.from('teams').select('*').order('team_name');
-  if (!teams) return [];
+  const { data: teams, error: teamsErr } = await supabase
+    .from('teams')
+    .select('*')
+    .order('team_name');
 
-  const { data: assignments } = await supabase
+  if (teamsErr) {
+    console.error(`[db] getAllTeams(${guildId}) teams query error:`, teamsErr.message);
+    throw new Error(`Database error loading teams: ${teamsErr.message}`);
+  }
+  if (!teams || teams.length === 0) return [];
+
+  const { data: assignments, error: assignErr } = await supabase
     .from('team_assignments')
     .select('*')
     .eq('guild_id', guildId);
+
+  if (assignErr) {
+    console.error(`[db] getAllTeams(${guildId}) assignments query error:`, assignErr.message);
+    // Non-fatal — return teams with no assignment info
+  }
 
   const assignMap = {};
   for (const a of (assignments || [])) assignMap[a.team_id] = a;
@@ -1176,12 +1210,21 @@ async function handleGameResult(interaction) {
   const summary      = interaction.options.getString('summary') || null;
   const userId       = interaction.user.id;
 
-  const yourTeam = await getTeamByUser(userId, guildId);
+  let yourTeam, oppTeam;
+  try {
+    yourTeam = await getTeamByUser(userId, guildId);
+  } catch (err) {
+    return interaction.reply({ content: `❌ **Database Error**\nCouldn't load your team: ${err.message}\n\nTry again in a moment. If this persists, check your Supabase connection.`, flags: 64 });
+  }
   if (!yourTeam) {
     return interaction.reply({ content: "❌ **No Team Assigned**\nYou don't have a team yet. Use `/joboffers` to receive coaching offers, or ask an admin to assign you a team with `/assign-team`.", flags: 64 });
   }
 
-  const oppTeam = await getTeamByName(opponentName, guildId);
+  try {
+    oppTeam = await getTeamByName(opponentName, guildId);
+  } catch (err) {
+    return interaction.reply({ content: `❌ **Database Error**\nCouldn't look up opponent "${opponentName}": ${err.message}`, flags: 64 });
+  }
   if (!oppTeam) {
     return interaction.reply({ content: `❌ **Opponent Not Found: \`${opponentName}\`**\nNo team with that name exists in the database. Make sure you selected from the autocomplete dropdown — partial or misspelled names won't match.`, flags: 64 });
   }
@@ -1252,8 +1295,11 @@ async function handleAnyGameResult(interaction) {
     });
   }
 
-  const team1 = await getTeamByName(team1Name, guildId);
-  const team2 = await getTeamByName(team2Name, guildId);
+  let team1, team2;
+  try { team1 = await getTeamByName(team1Name, guildId); }
+  catch (err) { return interaction.reply({ content: `❌ **Database Error**\nCouldn't look up "${team1Name}": ${err.message}`, flags: 64 }); }
+  try { team2 = await getTeamByName(team2Name, guildId); }
+  catch (err) { return interaction.reply({ content: `❌ **Database Error**\nCouldn't look up "${team2Name}": ${err.message}`, flags: 64 }); }
 
   if (!team1) return interaction.reply({ content: `❌ **Team Not Found: \`${team1Name}\`**\nNo team with that name exists in the database. Use the autocomplete dropdown to select teams.`, flags: 64 });
   if (!team2) return interaction.reply({ content: `❌ **Team Not Found: \`${team2Name}\`**\nNo team with that name exists in the database. Use the autocomplete dropdown to select teams.`, flags: 64 });
@@ -1420,7 +1466,9 @@ async function handleAssignTeam(interaction) {
 
   await interaction.deferReply();
 
-  const team = await getTeamByName(teamName, guildId);
+  let team;
+  try { team = await getTeamByName(teamName, guildId); }
+  catch (err) { return interaction.editReply(`❌ **Database Error**\nCouldn't look up team "${teamName}": ${err.message}`); }
   if (!team) return interaction.editReply(`❌ **Team Not Found: \`${teamName}\`**\nThis team doesn't exist in the global teams database. Make sure you selected from the autocomplete dropdown.\n\nIf the team is missing entirely, it may need to be added to the Supabase \`teams\` table.`);
 
   if (team.user_id && team.user_id !== user.id) {
@@ -1512,7 +1560,12 @@ async function handleListTeams(interaction) {
   const config  = await getConfig(guildId);
   await interaction.deferReply({ flags: 64 });
 
-  const allTeams = await getAllTeams(guildId);
+  let allTeams;
+  try {
+    allTeams = await getAllTeams(guildId);
+  } catch (err) {
+    return interaction.editReply(`❌ **Database Error**\nCouldn't load teams: ${err.message}\n\nCheck your Supabase connection and ensure the \`teams\` table exists and has data.`);
+  }
 
   const minRating = config.star_rating_for_offers     || 0;
   const maxRating = config.star_rating_max_for_offers || 999;
@@ -1763,8 +1816,11 @@ async function handleMoveCoach(interaction) {
   const user = await interaction.guild.members.fetch(coachId).then(m => m.user).catch(() => null);
   if (!user) return interaction.editReply('❌ **Coach Not Found**\nThis user couldn\'t be fetched from the server. They may have left.\n\nIf they\'re still in the server, try running `/move-coach` again and selecting from the autocomplete list.');
 
-  const currentTeam = await getTeamByUser(user.id, guildId);
-  const newTeam     = await getTeamByName(newTeamName, guildId);
+  let currentTeam, newTeam;
+  try { currentTeam = await getTeamByUser(user.id, guildId); }
+  catch (err) { return interaction.editReply(`❌ **Database Error**\nCouldn't load current team for this coach: ${err.message}`); }
+  try { newTeam = await getTeamByName(newTeamName, guildId); }
+  catch (err) { return interaction.editReply(`❌ **Database Error**\nCouldn't look up destination team "${newTeamName}": ${err.message}`); }
 
   if (!newTeam) return interaction.editReply(`❌ **Team Not Found: \`${newTeamName}\`**\nThis team doesn't exist in the database. Use the autocomplete dropdown to select a valid destination team.`);
   if (newTeam.user_id && newTeam.user_id !== user.id) {
