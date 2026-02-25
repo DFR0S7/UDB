@@ -1748,23 +1748,14 @@ async function handleAdvance(interaction) {
     return interaction.reply({ content: '❌ The advance system is disabled.', flags: 64 });
   }
 
-  const meta       = await getMeta(guildId);
-  const intervals  = config.advance_intervals_parsed || [24, 48];
-  let hoursInput   = interaction.options.getInteger('hours');
+  const meta      = await getMeta(guildId);
+  const intervals = config.advance_intervals_parsed || [24, 48];
 
-  if (!hoursInput) {
-    // If none provided, default to first interval
-    hoursInput = intervals[0] || 24;
-  }
-
-  if (!intervals.includes(hoursInput)) {
-    return interaction.reply({
-      content: `❌ Invalid interval. Choose from: ${intervals.join(', ')} hours.`, flags: 64,
-    });
-  }
+  // Get hours from option, default to first interval
+  let hoursInput = interaction.options.getInteger('hours');
+  if (!hoursInput) hoursInput = intervals[0] || 24;
 
   const deadline = new Date(Date.now() + hoursInput * 60 * 60 * 1000);
-  await setMeta(guildId, { advance_hours: hoursInput, advance_deadline: deadline.toISOString() });
 
   // Format deadline in multiple timezones
   const formatTZ = (date, tz) =>
@@ -1774,26 +1765,33 @@ async function handleAdvance(interaction) {
     .setTitle(`⏭️ Advance — Season ${meta.season} Week ${meta.week + 1}`)
     .setColor(config.embed_color_primary_int)
     .setDescription(`The league is advancing to **Week ${meta.week + 1}**!\nAll games must be completed within **${hoursInput} hours**.`)
-    .addFields(
-      { name: '🕐 Deadline', value:
+    .addFields({
+      name: '🕐 Deadline',
+      value:
         `🌴 ET: **${formatTZ(deadline, 'America/New_York')}**\n` +
         `🌵 CT: **${formatTZ(deadline, 'America/Chicago')}**\n` +
         `🏔️ MT: **${formatTZ(deadline, 'America/Denver')}**\n` +
         `🌊 PT: **${formatTZ(deadline, 'America/Los_Angeles')}**`,
-        inline: false },
-    )
+      inline: false,
+    })
     .setTimestamp();
 
-  // Post weekly recap to news feed before announcing the new week
+  // Post weekly recap to news feed first
   await postWeeklyRecap(interaction.guild, guildId, config, meta);
 
-  // Bump the week in meta
+  // Bump the week and save deadline
   await setMeta(guildId, { week: meta.week + 1, advance_hours: hoursInput, advance_deadline: deadline.toISOString() });
 
+  // Post to advance tracker channel
   const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
-  await interaction.reply({ embeds: [embed] });
-  if (advanceChannel && advanceChannel.id !== interaction.channelId) {
+  console.log(`[advance] channel_advance_tracker config: "${config.channel_advance_tracker}" → found: ${advanceChannel?.name || 'NULL'}`);
+
+  if (advanceChannel) {
     await advanceChannel.send({ embeds: [embed] });
+    await interaction.reply({ content: `✅ Advance posted in ${advanceChannel}!`, flags: 64 });
+  } else {
+    // Fall back to replying publicly in the current channel
+    await interaction.reply({ embeds: [embed] });
   }
 }
 
@@ -1812,9 +1810,20 @@ async function handleSeasonAdvance(interaction) {
     .setDescription(`Season **${meta.season}** is over! Welcome to **Season ${newSeason}**!\nAll records reset. Good luck!`)
     .setTimestamp();
 
-  await interaction.reply({ embeds: [embed] });
+  // Post to advance tracker
+  const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
+  console.log(`[season-advance] channel_advance_tracker config: "${config.channel_advance_tracker}" → found: ${advanceChannel?.name || 'NULL'}`);
+
+  if (advanceChannel) {
+    await advanceChannel.send({ embeds: [embed] });
+    await interaction.reply({ content: `✅ Season advance posted in ${advanceChannel}!`, flags: 64 });
+  } else {
+    await interaction.reply({ embeds: [embed] });
+  }
+
+  // Also post to news feed
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
-  if (newsChannel && newsChannel.id !== interaction.channelId) {
+  if (newsChannel) {
     await newsChannel.send({ embeds: [embed] });
   }
 }
