@@ -458,7 +458,8 @@ function buildCommands() {
     new SlashCommandBuilder()
       .setName('advance')
       .setDescription('Advance to next week (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addStringOption(o => o.setName('hours').setDescription('Deadline window for this week').setRequired(true).setAutocomplete(true)),
 
     new SlashCommandBuilder()
       .setName('season-advance')
@@ -1703,53 +1704,31 @@ async function postWeeklyRecap(guild, guildId, config, meta) {
 
 // /advance ────────────────────────────────────────────
 async function handleAdvance(interaction) {
+  await interaction.deferReply({ flags: 64 });
   const guildId = interaction.guildId;
 
-  // Always load fresh config for /advance so interval changes take effect immediately
+  // Always load fresh config so interval changes take effect immediately
   guildConfigs.delete(guildId);
-  const config  = await loadGuildConfig(guildId);
+  const config = await loadGuildConfig(guildId);
 
   if (!config.feature_advance_system) {
-    return interaction.reply({ content: '❌ **Advance System Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.', flags: 64 }); // no defer yet, safe to reply
+    return interaction.editReply({ content: '❌ **Advance System Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
   }
 
-  const meta      = await getMeta(guildId);
-  const intervals = config.advance_intervals_parsed || [24, 48];
+  const hoursStr   = interaction.options.getString('hours');
+  const hours      = parseInt(hoursStr);
+  const intervals  = config.advance_intervals_parsed || [24, 48];
 
-  // Build one button per configured interval
-  const buttons = intervals.map(h =>
-    new ButtonBuilder()
-      .setCustomId(`advance_${guildId}_${h}`)
-      .setLabel(`${h} Hours`)
-      .setStyle(ButtonStyle.Primary)
-  );
-
-  const rows = [];
-  for (let i = 0; i < buttons.length; i += 5) {
-    rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
+  if (isNaN(hours) || !intervals.includes(hours)) {
+    return interaction.editReply({
+      content:
+        `❌ **Invalid Option: \`${hoursStr}\`**\n` +
+        `Please select one of the available options from the dropdown.\n` +
+        `Configured intervals: ${intervals.map(h => h + 'h').join(', ')}`,
+    });
   }
 
-  await interaction.reply({
-    content:
-      `⏭️ **Advance to Week ${meta.week + 1}?**\n` +
-      `Season **${meta.season}** · Currently on Week **${meta.week}**\n\n` +
-      `Select the deadline window for this week's games:`,
-    components: rows,
-    flags: 64,
-  });
-}
-
-// Handles the button click after /advance shows interval options
-async function handleAdvanceConfirm(interaction) {
-  // customId format: advance_guildId_hours
-  const parts   = interaction.customId.split('_');
-  const guildId = parts[1];
-  const hours   = parseInt(parts[2]);
-
-  await interaction.deferUpdate();
-
-  const config  = await getConfig(guildId);
-  const meta    = await getMeta(guildId);
+  const meta     = await getMeta(guildId);
   const deadline = new Date(Date.now() + hours * 60 * 60 * 1000);
 
   const formatTZ = (date, tz) =>
@@ -1774,16 +1753,13 @@ async function handleAdvanceConfirm(interaction) {
   await postWeeklyRecap(interaction.guild, guildId, config, meta);
   await setMeta(guildId, { week: meta.week + 1, advance_hours: hours, advance_deadline: deadline.toISOString() });
 
-  // Remove buttons from the original ephemeral message
-  await interaction.editReply({ content: `✅ Advance confirmed — **${hours} hour** deadline set.`, components: [] });
-
-  // Post publicly to advance tracker channel
+  // Post publicly to advance-tracker channel
   const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
   if (advanceChannel) {
     await advanceChannel.send({ embeds: [embed] });
+    await interaction.editReply({ content: `✅ Advance posted in ${advanceChannel}!` });
   } else {
-    // Fall back to current channel if advance tracker not found
-    await interaction.followUp({ embeds: [embed] });
+    await interaction.editReply({ embeds: [embed] });
   }
 }
 
@@ -1941,14 +1917,17 @@ async function handleAutocomplete(interaction) {
   const query   = focused.value.toLowerCase();
   let choices   = [];
 
+  try {
+
   if (commandName === 'assign-team' || commandName === 'any-game-result') {
-    const { data: teams } = await supabase
+    const { data: teams, error } = await supabase
       .from('teams')
       .select('id, team_name, conference, star_rating')
       .ilike('team_name', `%${query}%`)
       .order('team_name')
       .limit(25);
 
+    if (error) console.error('[autocomplete] teams query error:', error.message);
     choices = (teams || []).map(t => ({
       name:  `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
       value: t.team_name,
@@ -1956,27 +1935,38 @@ async function handleAutocomplete(interaction) {
 
   } else if (commandName === 'move-coach') {
     if (focused.name === 'coach') {
-      const { data: assignments } = await supabase
+      const { data: assignments, error } = await supabase
         .from('team_assignments')
         .select('user_id, teams(team_name)')
         .eq('guild_id', guildId);
 
-      const guild = client.guilds.cache.get(guildId);
-      for (const a of (assignments || [])) {
-        const member = await guild.members.fetch(a.user_id).catch(() => null);
-        if (!member || !member.displayName.toLowerCase().includes(query)) continue;
-        choices.push({ name: `${member.displayName} — ${a.teams?.team_name || 'Unknown'}`, value: a.user_id });
+      if (error) {
+        console.error('[autocomplete] move-coach assignments error:', error.message);
+      } else {
+        // Bulk fetch all members at once instead of one-by-one in a loop
+        const guild = client.guilds.cache.get(guildId);
+        if (guild) {
+          // Filter by query first using cached members, fall back to fetching unknowns
+          for (const a of (assignments || [])) {
+            const cached = guild.members.cache.get(a.user_id);
+            const displayName = cached?.displayName;
+            if (!displayName) continue; // skip uncached members — avoids serial API calls
+            if (!displayName.toLowerCase().includes(query)) continue;
+            choices.push({ name: `${displayName} — ${a.teams?.team_name || 'Unknown'}`, value: a.user_id });
+            if (choices.length >= 25) break;
+          }
+        }
       }
-      choices = choices.slice(0, 25);
 
     } else if (focused.name === 'new-team') {
-      const { data: teams } = await supabase
+      const { data: teams, error } = await supabase
         .from('teams')
         .select('id, team_name, conference, star_rating')
         .ilike('team_name', `%${query}%`)
         .order('team_name')
         .limit(25);
 
+      if (error) console.error('[autocomplete] move-coach new-team error:', error.message);
       choices = (teams || []).map(t => ({
         name:  `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
         value: t.team_name,
@@ -1984,28 +1974,65 @@ async function handleAutocomplete(interaction) {
     }
 
   } else if (commandName === 'game-result') {
-    const userTeam = await getTeamByUser(interaction.user.id, guildId);
-    const { data: teams } = await supabase
+    // Get user's team_id directly (no join) then query teams table same as assign-team
+    const { data: assignment } = await supabase
+      .from('team_assignments')
+      .select('team_id')
+      .eq('user_id', interaction.user.id)
+      .eq('guild_id', guildId)
+      .maybeSingle();
+
+    const userTeamId = assignment?.team_id || null;
+
+    const { data: teams, error } = await supabase
       .from('teams')
-      .select('id, team_name, conference')
+      .select('id, team_name, conference, star_rating')
       .ilike('team_name', `%${query}%`)
       .order('team_name')
       .limit(25);
 
+    if (error) console.error('[autocomplete] game-result teams error:', error.message);
     choices = (teams || [])
-      .filter(t => !userTeam || t.team_name !== userTeam.team_name)
-      .map(t => ({ name: `${t.team_name}${t.conference ? ' · ' + t.conference : ''}`, value: t.team_name }));
+      .filter(t => t.id !== userTeamId)
+      .map(t => ({
+        name:  `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
+        value: t.team_name,
+      }));
 
   } else if (commandName === 'resetteam') {
-    const { data: assignments } = await supabase
+    // Get assigned team_ids first (no join), then look up teams directly
+    const { data: assignments, error: aErr } = await supabase
       .from('team_assignments')
-      .select('team_id, user_id, teams(team_name, conference)')
+      .select('team_id')
       .eq('guild_id', guildId);
 
-    choices = (assignments || [])
-      .filter(a => a.teams?.team_name.toLowerCase().includes(query))
-      .slice(0, 25)
-      .map(a => ({ name: `${a.teams.team_name}${a.teams.conference ? ' · ' + a.teams.conference : ''}`, value: a.teams.team_name }));
+    if (aErr) console.error('[autocomplete] resetteam assignments error:', aErr.message);
+
+    const assignedIds = (assignments || []).map(a => a.team_id);
+    if (assignedIds.length > 0) {
+      const { data: teams, error: tErr } = await supabase
+        .from('teams')
+        .select('id, team_name, conference, star_rating')
+        .in('id', assignedIds)
+        .ilike('team_name', `%${query}%`)
+        .order('team_name')
+        .limit(25);
+
+      if (tErr) console.error('[autocomplete] resetteam teams error:', tErr.message);
+      choices = (teams || []).map(t => ({
+        name:  `${t.team_name}${t.conference ? ' · ' + t.conference : ''}${t.star_rating ? ' · ' + t.star_rating + '⭐' : ''}`,
+        value: t.team_name,
+      }));
+    }
+
+  } else if (commandName === 'advance') {
+    // Always load fresh config so intervals reflect latest settings
+    guildConfigs.delete(guildId);
+    const advConfig  = await loadGuildConfig(guildId);
+    const intervals  = advConfig.advance_intervals_parsed || [24, 48];
+    choices = intervals
+      .filter(h => String(h).includes(query))
+      .map(h => ({ name: `${h} Hours`, value: String(h) }));
 
   } else if (commandName === 'config' && focused.name === 'setting') {
     const allSettings = [
@@ -2084,7 +2111,18 @@ async function handleAutocomplete(interaction) {
     }
   }
 
-  await interaction.respond(choices);
+  } catch (err) {
+    console.error('[autocomplete] Unhandled error:', err.message);
+    choices = []; // respond with empty list so Discord doesn't show "loading failed"
+  }
+
+  // Always respond — never leave an autocomplete interaction hanging
+  if (!interaction.responded) {
+    await interaction.respond(choices).catch(e => {
+      // Token may have expired if we took too long — log and move on
+      if (e.code !== 10062) console.error('[autocomplete] respond error:', e.message);
+    });
+  }
 }
 
 // =====================================================
@@ -2123,7 +2161,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isButton()) {
       if (interaction.customId.startsWith('accept-offer_')) return handleAcceptOffer(interaction);
-      if (interaction.customId.startsWith('advance_'))      return handleAdvanceConfirm(interaction);
     }
 
     if (interaction.isStringSelectMenu()) {
