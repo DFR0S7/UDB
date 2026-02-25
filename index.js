@@ -367,22 +367,24 @@ async function upsertRecord(record) {
 // =====================================================
 // STREAM REMINDER TRACKING
 // =====================================================
-const streamReminderTimers = new Map(); // `${guildId}-${channelId}-${userId}` → timeout
-
 function scheduleStreamReminder(channel, userId, guildId, minutes) {
   const key = `${guildId}-${channel.id}-${userId}`;
   if (streamReminderTimers.has(key)) return;
+
   const timer = setTimeout(async () => {
     streamReminderTimers.delete(key);
     try {
       await channel.send(
-        `<@${userId}> ⏰ **Stream Reminder:** ${minutes} minutes have passed since you posted your stream link! Make sure you've notified your opponent.`
+        `<@${userId}> Friendly reminder! Please share your game results using the \`/game-result\` command 😊`
       );
+      console.log(`[stream] Reminder sent to ${userId} in guild ${guildId}`);
     } catch (e) {
       console.error('[stream] Could not send reminder:', e.message);
     }
   }, minutes * 60 * 1000);
+
   streamReminderTimers.set(key, timer);
+  console.log(`[stream] Scheduled ${minutes}min reminder for user ${userId} in guild ${guildId}`);
 }
 
 // =====================================================
@@ -1280,6 +1282,14 @@ async function handleGameResult(interaction) {
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
   if (newsChannel && newsChannel.id !== interaction.channelId) {
     await newsChannel.send({ embeds: [embed] });
+  }
+}
+// Inside handleGameResult, right after successful insert into 'results'
+for (const [key, timer] of streamReminderTimers.entries()) {
+  if (key.startsWith(`${guildId}-`) && key.endsWith(`-${userId}`)) {
+    clearTimeout(timer);
+    streamReminderTimers.delete(key);
+    console.log(`[stream] Cancelled reminder for ${userId} after submitting result`);
   }
 }
 
@@ -2192,14 +2202,15 @@ client.on(Events.MessageCreate, async (message) => {
   const config = await getConfig(message.guildId).catch(() => null);
   if (!config?.feature_stream_reminders) return;
 
+  // Only watch the configured streaming channel
   if (message.channel.name?.toLowerCase() !== config.channel_streaming?.toLowerCase()) return;
 
-  const hasStreamLink = /https?:\/\/(www\.)?(youtube\.com|youtu\.be|twitch\.tv)\//i.test(message.content);
-  if (!hasStreamLink) return;
+  // Detect YouTube / Twitch links (robust regex)
+  const streamRegex = /https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be|twitch\.tv)\/[^\s<>"')]+/i;
+  if (!streamRegex.test(message.content)) return;
 
   const minutes = config.stream_reminder_minutes || 45;
   scheduleStreamReminder(message.channel, message.author.id, message.guildId, minutes);
-  console.log(`[stream] Scheduled ${minutes}min reminder for ${message.author.username} in #${message.channel.name}`);
 });
 
 // =====================================================
