@@ -71,6 +71,8 @@ const PHASE_CYCLE = [
 // Quick lookup helper
 const getPhaseByKey = (key) => PHASE_CYCLE.find(p => p.key === key) || PHASE_CYCLE[0];
 
+const streamReminderTimers = new Map();
+
 // =====================================================
 // HEALTH SERVER (always on for Render)
 // =====================================================
