@@ -2300,7 +2300,9 @@ async function initGuild(guild) {
   current_phase: newPhase,
   current_sub_phase: newSub,
   last_advance_at: new Date().toISOString(),
-  next_advance_deadline: nextDeadline.toISOString(), { onConflict: 'guild_id' });
+  next_advance_deadline: nextDeadline.toISOString(),
+      },
+    { onConflict: 'guild_id' });
     console.log(`[guild] Auto-created config for: ${guild.name} (${guild.id})`);
 
     const owner = await guild.fetchOwner().catch(() => null);
