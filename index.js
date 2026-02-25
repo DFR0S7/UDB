@@ -403,37 +403,44 @@ async function upsertRecord(record) {
 // =====================================================
 
 async function setCoachStream(guildId, userId, streamUrl) {
-  const platform = streamUrl.toLowerCase().includes('twitch') ? 'twitch' :
-                   streamUrl.toLowerCase().includes('youtube') ? 'youtube' : 'other';
+  let platform = 'other';
+  const urlLower = streamUrl.toLowerCase();
 
-  await supabase.from('coach_streams').upsert({
+  if (urlLower.includes('twitch.tv'))       platform = 'twitch';
+  else if (urlLower.includes('youtube.com') || urlLower.includes('youtu.be')) platform = 'youtube';
+  else if (urlLower.includes('kick.com'))   platform = 'kick';
+  else if (urlLower.includes('facebook.com/live')) platform = 'facebook';
+  else if (urlLower.includes('tiktok.com')) platform = 'tiktok';
+
+  const { error } = await supabase.from('coach_streams').upsert({
     guild_id: guildId,
     user_id: userId,
     stream_url: streamUrl.trim(),
-    platform: platform,
+    platform,
     updated_at: new Date().toISOString()
   }, { onConflict: 'guild_id,user_id' });
+
+  if (error) throw error;
 }
 
-async function getCoachStream(guildId, userId) {
-  const { data } = await supabase
+async function removeCoachStream(guildId, userId) {
+  await supabase
     .from('coach_streams')
-    .select('stream_url')
+    .delete()
     .eq('guild_id', guildId)
-    .eq('user_id', userId)
-    .maybeSingle();
-  return data?.stream_url || null;
+    .eq('user_id', userId);
 }
 
 async function getAllStreamers(guildId) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('coach_streams')
     .select('user_id, stream_url, platform')
     .eq('guild_id', guildId)
-    .order('platform');
+    .order('platform', { ascending: true });
+
+  if (error) throw error;
   return data || [];
 }
-
 // =====================================================
 // STREAM REMINDER TRACKING
 // =====================================================
@@ -962,40 +969,69 @@ async function handleSetup(interaction) {
 
 // /set-stream
 async function handleSetStream(interaction) {
-  await interaction.deferReply({ flags: 64 });
-  const guildId = interaction.guildId;
-  const userId = interaction.user.id;
-  const url = interaction.options.getString('url');
+  await interaction.deferReply({ ephemeral: true });
 
-  await setCoachStream(guildId, userId, url);
+  const url = interaction.options.getString('url', true).trim();
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    return interaction.editReply('❌ Please provide a valid URL starting with http:// or https://');
+  }
 
-  await interaction.editReply({
-    content: `✅ Your streaming link has been saved: **${url}**\n\nAdmins can now see it with \`/list-streamers\`.`
-  });
+  try {
+    await setCoachStream(interaction.guildId, interaction.user.id, url);
+    await interaction.editReply(`✅ Your streaming link has been saved:\n${url}`);
+  } catch (err) {
+    console.error('[set-stream] Error:', err);
+    await interaction.editReply('❌ Failed to save stream link. Please try again later.');
+  }
 }
 
-// /list-streamers (Admin only)
 async function handleListStreamers(interaction) {
-  await interaction.deferReply({ flags: 64 });
+  await interaction.deferReply({ ephemeral: true });
 
   if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
-    return interaction.editReply({ content: "❌ Only admins can use this command." });
+    return interaction.editReply({ content: 'This command is admin-only.', ephemeral: true });
   }
 
   const streamers = await getAllStreamers(interaction.guildId);
 
   if (streamers.length === 0) {
-    return interaction.editReply("No streamers have been set yet.");
+    return interaction.editReply({ content: 'No coaches have set a streaming link yet.', ephemeral: true });
   }
 
-  let text = "**Coach Streaming List** (copy-paste ready for Wamellow)\n\n";
-  for (const s of streamers) {
-    const member = await interaction.guild.members.fetch(s.user_id).catch(() => null);
-    const name = member ? member.displayName : `<@${s.user_id}>`;
-    text += `• ${name} → ${s.stream_url}\n`;
+  // Format for easy copy-paste into Wamellow
+  let text = "**Streaming list for Wamellow**\n\n";
+
+  const rows = [];
+  for (const entry of streamers) {
+    const member = await interaction.guild.members.fetch(entry.user_id).catch(() => null);
+    const name = member?.displayName ?? `<@${entry.user_id}>`;
+    const platformEmoji = {
+      twitch:   '🟣',
+      youtube:  '🔴',
+      kick:     '🟢',
+      facebook: '🔵',
+      tiktok:   '⚫',
+      other:    '📺'
+    }[entry.platform] || '📺';
+
+    text += `${platformEmoji} **${name}** → ${entry.stream_url}\n`;
+
+    // Also build rows for the copy button
+    rows.push(`${platformEmoji} ${name.padEnd(25)} → ${entry.stream_url}`);
   }
 
-  await interaction.editReply({ content: text });
+  const copyButton = new ButtonBuilder()
+    .setCustomId('copy_stream_list')
+    .setLabel('Copy list to clipboard')
+    .setStyle(ButtonStyle.Secondary);
+
+  const row = new ActionRowBuilder().addComponents(copyButton);
+
+  await interaction.editReply({
+    content: '```' + text + '```',
+    components: [row],
+    ephemeral: true
+  });
 }
 
 // /config view ────────────────────────────────────────
@@ -1663,6 +1699,10 @@ async function handleResetTeam(interaction) {
 
   await unassignTeam(team.id, guildId);
 
+  await removeCoachStream(guildId, user.id).catch(err => {
+  console.warn('[reset] Failed to remove stream link:', err.message);
+});
+  
   const member = await interaction.guild.members.fetch(user.id).catch(() => null);
   let roleWarning = '';
   if (member && config.role_head_coach_id) {
@@ -1691,6 +1731,7 @@ async function handleResetTeam(interaction) {
   if (announceTarget) await announceTarget.send({ embeds: [releaseEmbed] }).catch(() => {});
 
   await interaction.editReply({ content: `✅ <@${user.id}> has been removed from **${team.team_name}**.${roleWarning}` });
+  
 }
 
 // /listteams ──────────────────────────────────────────
@@ -2336,7 +2377,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
       if (interaction.customId.startsWith('accept-offer_')) return handleAcceptOffer(interaction);
     }
+    
+    if (interaction.isButton() && interaction.customId === 'copy_stream_list') {
+  await interaction.deferUpdate();
 
+  // Discord doesn't allow direct clipboard write from bot
+  // So we give the user a code block they can easily copy
+  const message = interaction.message.content.replace(/```/g, '').trim();
+
+  await interaction.followUp({
+    content: 'Copy the text below (click the code block and press Ctrl+C / Cmd+C):\n\n```' + message + '```',
+    ephemeral: true});
+    }
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId.startsWith('features-toggle-')) {
         const guildId  = interaction.guildId;
