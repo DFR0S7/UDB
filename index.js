@@ -138,6 +138,7 @@ const CONFIG_DEFAULTS = {
   league_abbreviation:       '',
   feature_job_offers:        true,
   feature_stream_reminders:  true,
+  feature_streaming:          true,
   feature_advance_system:    true,
   feature_press_releases:    true,
   feature_rankings:          true,
@@ -569,14 +570,17 @@ function buildCommands() {
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
     new SlashCommandBuilder()
-      .setName('set-stream')
-      .setDescription('Set your personal streaming channel (Twitch/YouTube/etc)')
-      .addStringOption(o => o.setName('url').setDescription('Your stream URL or username').setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName('list-streamers')
-      .setDescription('Show all coaches and their streaming channels (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+      .setName('streaming')
+      .setDescription('Streaming commands for Wamellow integration')
+      .addSubcommand(sub => sub
+        .setName('set')
+        .setDescription('Save your stream URL (Twitch, YouTube, Kick, etc.)')
+        .addStringOption(o => o.setName('url').setDescription('Your full stream URL').setRequired(true))
+      )
+      .addSubcommand(sub => sub
+        .setName('list')
+        .setDescription('List all coaches and their stream URLs')
+      ),
     
   ].map(cmd => cmd.toJSON());
 }
@@ -783,6 +787,7 @@ async function handleSetup(interaction) {
   const featureOptions = [
     { label: 'Job Offers',       id: 'job_offers' },
     { label: 'Stream Reminders', id: 'stream_reminders' },
+    { label: 'Streaming',        id: 'streaming' },
     { label: 'Advance System',   id: 'advance_system' },
     { label: 'Press Releases',   id: 'press_releases' },
     { label: 'Rankings',         id: 'rankings' },
@@ -797,6 +802,7 @@ async function handleSetup(interaction) {
   const features = {
     feature_job_offers:       selectedFeatures.includes('job_offers'),
     feature_stream_reminders: selectedFeatures.includes('stream_reminders'),
+    feature_streaming:        selectedFeatures.includes('streaming'),
     feature_advance_system:   selectedFeatures.includes('advance_system'),
     feature_press_releases:   selectedFeatures.includes('press_releases'),
     feature_rankings:         selectedFeatures.includes('rankings'),
@@ -815,7 +821,7 @@ async function handleSetup(interaction) {
   const needsSigned    = features.feature_job_offers;
   const needsTeamList  = features.feature_job_offers;
   const needsAdvance   = features.feature_advance_system;
-  const needsStreaming = features.feature_stream_reminders;
+  const needsStreaming = features.feature_stream_reminders || features.feature_streaming;
 
   if (needsNewsFeed || needsSigned || needsTeamList || needsAdvance || needsStreaming) {
     await dm.send('**— Channel Setup —**\nSelect the channel for each feature you enabled.');
@@ -930,6 +936,7 @@ async function handleSetup(interaction) {
       { name: '\u200b',           value: '\u200b',     inline: true },
       { name: 'Job Offers',       value: features.feature_job_offers       ? '✅' : '❌', inline: true },
       { name: 'Stream Reminders', value: features.feature_stream_reminders ? '✅' : '❌', inline: true },
+      { name: 'Streaming',         value: features.feature_streaming         ? '✅' : '❌', inline: true },
       { name: 'Advance System',   value: features.feature_advance_system   ? '✅' : '❌', inline: true },
       { name: 'Press Releases',   value: features.feature_press_releases   ? '✅' : '❌', inline: true },
       { name: 'Rankings',         value: features.feature_rankings         ? '✅' : '❌', inline: true },
@@ -968,68 +975,76 @@ async function handleSetup(interaction) {
   }
 }
 
-// /set-stream
-async function handleSetStream(interaction) {
+// /streaming ─────────────────────────────────────────
+async function handleStreaming(interaction) {
   await interaction.deferReply({ flags: 64 });
+  const config = await getConfig(interaction.guildId);
 
-  const url = interaction.options.getString('url', true).trim();
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    return interaction.editReply('❌ Please provide a valid URL starting with http:// or https://');
+  if (!config.feature_streaming) {
+    return interaction.editReply({ content: '❌ **Streaming Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
   }
 
-  try {
-    await setCoachStream(interaction.guildId, interaction.user.id, url);
-    await interaction.editReply(`✅ Your streaming link has been saved:\n${url}`);
-  } catch (err) {
-    console.error('[set-stream] Error:', err);
-    await interaction.editReply('❌ Failed to save stream link. Please try again later.');
-  }
-}
+  const sub = interaction.options.getSubcommand();
 
-async function handleListStreamers(interaction) {
-  await interaction.deferReply({ flags: 64 });
-
-  let streamers;
-  try {
-    streamers = await getAllStreamers(interaction.guildId);
-  } catch (err) {
-    return interaction.editReply(`❌ **Database Error**\nCouldn't load streamers: ${err.message}`);
-  }
-
-  if (streamers.length === 0) {
-    return interaction.editReply('No coaches have set a streaming link yet.');
-  }
-
-  // Use cached members only — no serial API calls
-  const rows = streamers.map(entry => {
-    const member = interaction.guild.members.cache.get(entry.user_id);
-    const name   = member?.displayName ?? `Unknown (${entry.user_id})`;
-    return { name, url: entry.stream_url };
-  });
-
-  // Align columns: pad coach names to the longest name width
-  const maxLen = Math.max(...rows.map(r => r.name.length));
-  const tableLines = rows.map(r => `${r.name.padEnd(maxLen)}  ${r.url}`);
-  const header     = `${'Coach'.padEnd(maxLen)}  URL`;
-  const divider    = `${'-'.repeat(maxLen)}  ${'-'.repeat(40)}`;
-  const table      = [header, divider, ...tableLines].join('\n');
-
-  // Discord has a 2000 char message limit — split if needed
-  const block = '```\n' + table + '\n```';
-  if (block.length <= 2000) {
-    await interaction.editReply({ content: `**Streamers (${rows.length})**\n${block}` });
-  } else {
-    // Split into chunks
-    await interaction.editReply({ content: `**Streamers (${rows.length})** — copy the table below:` });
-    let chunk = '```\n' + header + '\n' + divider + '\n';
-    for (const line of tableLines) {
-      if ((chunk + line + '\n```').length > 2000) {
-        await interaction.followUp({ content: chunk + '```', flags: 64 });
-        chunk = '```\n';
-      }
-      chunk += line + '\n';
+  if (sub === 'set') {
+    const url = interaction.options.getString('url', true).trim();
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      return interaction.editReply('❌ **Invalid URL**\nPlease provide a full URL starting with `http://` or `https://`.');
     }
-    if (chunk !== '```\n') await interaction.followUp({ content: chunk + '```', flags: 64 });
+    try {
+      await setCoachStream(interaction.guildId, interaction.user.id, url);
+      await interaction.editReply(`✅ **Stream link saved!**\n${url}\n\nAdmins can run \`/streaming list\` to see all coaches and their URLs.`);
+    } catch (err) {
+      console.error('[streaming set] Error:', err);
+      await interaction.editReply(`❌ **Failed to save stream link**\nDatabase error: ${err.message}`);
+    }
+    return;
+  }
+
+  if (sub === 'list') {
+    // list is available to everyone but most useful to admins
+    let streamers;
+    try {
+      streamers = await getAllStreamers(interaction.guildId);
+    } catch (err) {
+      return interaction.editReply(`❌ **Database Error**\nCouldn't load streamers: ${err.message}`);
+    }
+
+    if (streamers.length === 0) {
+      return interaction.editReply('No coaches have set a streaming link yet.');
+    }
+
+    // Use cached members only — no serial API calls
+    const rows = streamers.map(entry => {
+      const member = interaction.guild.members.cache.get(entry.user_id);
+      const name   = member?.displayName ?? `Unknown (${entry.user_id})`;
+      return { name, url: entry.stream_url };
+    });
+
+    // Align columns: pad coach names to the longest name width
+    const maxLen     = Math.max(...rows.map(r => r.name.length));
+    const tableLines = rows.map(r => `${r.name.padEnd(maxLen)}  ${r.url}`);
+    const header     = `${'Coach'.padEnd(maxLen)}  URL`;
+    const divider    = `${'-'.repeat(maxLen)}  ${'-'.repeat(40)}`;
+    const table      = [header, divider, ...tableLines].join('\n');
+
+    // Discord has a 2000 char limit — split into chunks if needed
+    const block = '```\n' + table + '\n```';
+    if (block.length <= 2000) {
+      await interaction.editReply({ content: `**Streamers (${rows.length})**\n${block}` });
+    } else {
+      await interaction.editReply({ content: `**Streamers (${rows.length})** — copy the table below:` });
+      let chunk = '```\n' + header + '\n' + divider + '\n';
+      for (const line of tableLines) {
+        if ((chunk + line + '\n```').length > 2000) {
+          await interaction.followUp({ content: chunk + '```', flags: 64 });
+          chunk = '```\n';
+        }
+        chunk += line + '\n';
+      }
+      if (chunk !== '```\n') await interaction.followUp({ content: chunk + '```', flags: 64 });
+    }
+    return;
   }
 }
 
@@ -1048,6 +1063,7 @@ async function handleConfigView(interaction) {
       { name: '🔧 Features', value:
         `Job Offers: ${config.feature_job_offers ? '✅' : '❌'}\n` +
         `Stream Reminders: ${config.feature_stream_reminders ? '✅' : '❌'}\n` +
+        `Streaming:        ${config.feature_streaming         ? '✅' : '❌'}\n` +
         `Advance System: ${config.feature_advance_system ? '✅' : '❌'}\n` +
         `Press Releases: ${config.feature_press_releases ? '✅' : '❌'}\n` +
         `Rankings: ${config.feature_rankings ? '✅' : '❌'}`,
@@ -1080,13 +1096,14 @@ async function handleConfigFeatures(interaction) {
       .setCustomId(`features-toggle-${interaction.guildId}`)
       .setPlaceholder('Select features to toggle...')
       .setMinValues(0)
-      .setMaxValues(5)
+      .setMaxValues(6)
       .addOptions([
-        { label: 'Job Offers',       value: 'feature_job_offers',       description: 'Enable/disable job offer system',    default: config.feature_job_offers },
-        { label: 'Stream Reminders', value: 'feature_stream_reminders', description: 'Enable/disable stream reminders',    default: config.feature_stream_reminders },
-        { label: 'Advance System',   value: 'feature_advance_system',   description: 'Enable/disable advance system',      default: config.feature_advance_system },
-        { label: 'Press Releases',   value: 'feature_press_releases',   description: 'Enable/disable press releases',      default: config.feature_press_releases },
-        { label: 'Rankings',         value: 'feature_rankings',         description: 'Enable/disable rankings',            default: config.feature_rankings },
+        { label: 'Job Offers',       value: 'feature_job_offers',       description: 'Job offer system for coaches',             default: !!config.feature_job_offers },
+        { label: 'Stream Reminders', value: 'feature_stream_reminders', description: 'Auto-reminder when stream link is posted', default: !!config.feature_stream_reminders },
+        { label: 'Streaming',        value: 'feature_streaming',        description: '/streaming set & list for Wamellow',       default: !!config.feature_streaming },
+        { label: 'Advance System',   value: 'feature_advance_system',   description: 'Phase advance system',                     default: !!config.feature_advance_system },
+        { label: 'Press Releases',   value: 'feature_press_releases',   description: 'Coach press release announcements',        default: !!config.feature_press_releases },
+        { label: 'Rankings',         value: 'feature_rankings',         description: 'Season standings and all-time rankings',   default: !!config.feature_rankings },
       ])
   );
   await interaction.editReply({
@@ -2366,8 +2383,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'advance':           return handleAdvance(interaction);
         case 'season-advance':    return handleSeasonAdvance(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
-        case 'set-stream':        return handleSetStream(interaction);
-        case 'list-streamers':    return handleListStreamers(interaction);
+        case 'streaming':         return handleStreaming(interaction);
         case 'config':
           switch (interaction.options.getSubcommand()) {
             case 'view':     return handleConfigView(interaction);
@@ -2398,7 +2414,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId.startsWith('features-toggle-')) {
         const guildId  = interaction.guildId;
         const selected = interaction.values;
-        const allFeatures = ['feature_job_offers','feature_stream_reminders','feature_advance_system','feature_press_releases','feature_rankings'];
+        const allFeatures = ['feature_job_offers','feature_stream_reminders','feature_streaming','feature_advance_system','feature_press_releases','feature_rankings'];
         const updates  = Object.fromEntries(allFeatures.map(f => [f, selected.includes(f)]));
         await saveConfig(guildId, updates);
         const lines = allFeatures.map(f => `${updates[f] ? '✅' : '❌'} ${f.replace('feature_', '').replace(/_/g, ' ')}`);
