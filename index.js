@@ -137,6 +137,7 @@ const CONFIG_DEFAULTS = {
   league_name:                  'Dynasty League',
   league_abbreviation:          '',
   setup_complete:               false,
+  league_type:                  'new',      // 'new' | 'established'
   // ── Feature flags ─────────────────────────────
   feature_game_result:          true,
   feature_any_game_result:      true,
@@ -818,11 +819,27 @@ async function handleSetup(interaction) {
     .values()];
 
   // ── League Info ───────────────────────────────────────────────────────────
-  const leagueName = await ask('**[League 1/2]** What is your league name?\nExample: CMR Dynasty');
+  const leagueName = await ask('**[League 1/3]** What is your league name?\nExample: CMR Dynasty');
   if (!leagueName) return;
 
-  const leagueAbbr = await ask('**[League 2/2]** What is your league abbreviation or keyword?\nExample: CMR');
+  const leagueAbbr = await ask(
+    '**[League 2/3]** What is your league abbreviation or keyword?\n' +
+    'Example: `CMR`\n\n' +
+    '📡 **Wamellow note:** This keyword is used to filter stream titles. ' +
+    'Wamellow will only autopost streams whose title contains this abbreviation — ' +
+    'make sure your coaches include it in their stream titles.'
+  );
   if (!leagueAbbr) return;
+
+  // ── League Type ───────────────────────────────────────────────────────────
+  const leagueType = await askButtons(
+    '**[League 3/3]** What best describes your league?',
+    [
+      { id: 'new',         label: '🆕 New League',         style: ButtonStyle.Primary },
+      { id: 'established', label: '🏛️ Established League', style: ButtonStyle.Secondary },
+    ]
+  );
+  if (!leagueType) return;
 
   // ── Group-Based Feature Selection ────────────────────────────────────────
 
@@ -845,7 +862,28 @@ async function handleSetup(interaction) {
     );
   };
 
-  await dm.send('**— Feature Setup —**\nConfigure each feature group one at a time.');
+  // Build recommendation message based on league type
+  let featureGuidance;
+  if (leagueType === 'new') {
+    featureGuidance =
+      '**— Feature Setup —**\n' +
+      'Configure each feature group one at a time.\n\n' +
+      '💡 **New League recommendation:**\n' +
+      'Since you\'re starting fresh, focus on **👥 Team Selection** — specifically ' +
+      '**Job Offers** so coaches can request and accept teams through the bot. ' +
+      'Enable **🏈 Game Day** once teams are assigned and play has started. ' +
+      'Nothing is on by default — enable only what you need.';
+  } else {
+    featureGuidance =
+      '**— Feature Setup —**\n' +
+      'Configure each feature group one at a time.\n\n' +
+      '💡 **Established League recommendation:**\n' +
+      'Since coaches already have teams, focus on **👥 Team Selection** — specifically ' +
+      '**Assign Team** so you can map existing coaches to their teams directly. ' +
+      'You likely won\'t need Job Offers unless you\'re still growing. Enable **🏈 Game Day** if you want coaches ' +
+      'to record game results. Nothing is on by default — enable only what you need.';
+  }
+  await dm.send(featureGuidance);
 
   const gameDayCmds = [
     { label: 'Game Result',           id: 'feature_game_result' },
@@ -1015,14 +1053,15 @@ async function handleSetup(interaction) {
       ...streamConfig,
       ...advanceConfig,
       setup_complete:      true,
+      league_type:         leagueType,
     });
 
     // ── Summary Embed — group-based display ───────────────────────────────
     const fv = (flag) => features[flag] ? '✅' : '❌';
     const summaryFields = [
-      { name: 'League Name',  value: leagueName, inline: true },
-      { name: 'Abbreviation', value: leagueAbbr, inline: true },
-      { name: '\u200b',       value: '\u200b',   inline: true },
+      { name: 'League Name',  value: leagueName,                                          inline: true },
+      { name: 'Abbreviation', value: leagueAbbr,                                          inline: true },
+      { name: 'League Type',  value: leagueType === 'new' ? '🆕 New League' : '🏛️ Established League', inline: true },
       {
         name: '🏈 Game Day',
         value:
@@ -1553,6 +1592,11 @@ async function handleAcceptOffer(interaction) {
 
   await interaction.deferUpdate();
 
+  const offerConfig = await getConfig(guildId).catch(() => null);
+  if (!offerConfig?.setup_complete) {
+    return interaction.followUp({ content: '⚙️ **Setup Required**\nThis server has not been configured yet. Ask an admin to run `/setup`.', flags: 64 });
+  }
+
   const { data: offer } = await supabase
     .from('job_offers')
     .select('*, teams(*)')
@@ -1645,6 +1689,7 @@ async function expireJobOffers() {
       const guild  = client.guilds.cache.get(guild_id);
       if (!guild) continue;
       const config = await getConfig(guild_id);
+      if (!config?.setup_complete) continue; // skip guilds that haven't completed setup
       const member = await guild.members.fetch(user_id).catch(() => null);
       if (!member) continue;
 
@@ -1771,6 +1816,7 @@ async function handleAnyGameResult(interaction) {
   await interaction.deferReply();
   const guildId   = interaction.guildId;
   const config    = await getConfig(guildId);
+  if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_any_game_result) return interaction.editReply({ content: '❌ Any-game-result is disabled on this server.' });
   const meta      = await getMeta(guildId);
   const team1Name = interaction.options.getString('team1');
@@ -1925,6 +1971,7 @@ async function handleRankingAllTime(interaction) {
 async function handleAssignTeam(interaction) {
   const guildId  = interaction.guildId;
   const config   = await getConfig(guildId);
+  if (!config.setup_complete) return interaction.reply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.', flags: 64 });
   if (!config.feature_assign_team) return interaction.reply({ content: '❌ Team assignment is disabled on this server.', flags: 64 });
   const guild    = interaction.guild;
   const user     = interaction.options.getUser('user');
@@ -1983,6 +2030,7 @@ async function handleResetTeam(interaction) {
   await interaction.deferReply();
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
+  if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_reset_team) return interaction.editReply({ content: '❌ Team reset is disabled on this server.' });
   const user    = interaction.options.getUser('user');
 
@@ -2033,6 +2081,7 @@ async function handleListTeams(interaction) {
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
   await interaction.deferReply({ flags: 64 });
+  if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_list_teams) return interaction.editReply({ content: '❌ Team listing is disabled on this server.' });
 
   let allTeams;
@@ -2173,6 +2222,7 @@ async function handleAdvance(interaction) {
   guildConfigs.delete(guildId);
   const config = await loadGuildConfig(guildId);
 
+  if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_advance) {
     return interaction.editReply({ content: '❌ **Advance Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
   }
@@ -2267,6 +2317,7 @@ async function handleSeasonAdvance(interaction) {
   await interaction.deferReply({ flags: 64 });
   const guildId = interaction.guildId;
   const config = await getConfig(guildId);
+  if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_season_advance) return interaction.editReply({ content: '❌ Season advance is disabled on this server.' });
   const meta = await getMeta(guildId);
 
@@ -2310,6 +2361,7 @@ async function handleSeasonAdvance(interaction) {
 async function handleMoveCoach(interaction) {
   const guildId     = interaction.guildId;
   const config      = await getConfig(guildId);
+  if (!config.setup_complete) return interaction.reply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.', flags: 64 });
   if (!config.feature_move_coach) return interaction.reply({ content: '❌ Move coach is disabled on this server.', flags: 64 });
   const coachId     = interaction.options.getString('coach');
   const newTeamName = interaction.options.getString('new-team');
@@ -2907,6 +2959,7 @@ client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot && !isWamellow) return;
 
   const config = await getConfig(message.guildId).catch(() => null);
+  if (!config?.setup_complete) return;
   if (!config?.feature_game_results_reminder) return;
 
   if (message.channel.name?.toLowerCase() !== config.channel_streaming?.toLowerCase()) return;
