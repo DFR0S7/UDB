@@ -139,20 +139,20 @@ const CONFIG_DEFAULTS = {
   setup_complete:               false,
   league_type:                  'new',      // 'new' | 'established'
   // ── Feature flags ─────────────────────────────
-  feature_game_result:          true,
-  feature_any_game_result:      true,
-  feature_ranking:              true,
-  feature_ranking_all_time:     true,
+  feature_game_result:          false,
+  feature_any_game_result:      false,
+  feature_ranking:              false,
+  feature_ranking_all_time:     false,
   feature_game_results_reminder:false,
-  feature_job_offers:           true,
-  feature_assign_team:          true,
-  feature_reset_team:           true,
-  feature_list_teams:           true,
-  feature_move_coach:           true,
-  feature_advance:              true,
-  feature_season_advance:       true,
-  feature_stream_autopost:      true,
-  feature_streaming_list:       true,
+  feature_job_offers:           false,
+  feature_assign_team:          false,
+  feature_reset_team:           false,
+  feature_list_teams:           false,
+  feature_move_coach:           false,
+  feature_advance:              false,
+  feature_season_advance:       false,
+  feature_stream_autopost:      false,
+  feature_streaming_list:       false,
   // ── Channels ──────────────────────────────────
   channel_news_feed:            'news-feed',
   channel_advance_tracker:      'advance-tracker',
@@ -2256,6 +2256,43 @@ async function handleAdvance(interaction) {
     newPhase      = PHASE_CYCLE[nextIdx].key;
     newSub        = 0;
     if (newPhase === 'preseason') newSeason = newSeason + 1;
+  }
+
+  // ── Week 15 skip prompt ───────────────────────────────────────────────────
+  // Week 15 = sub_phase 14 in regular season (0-indexed). Some leagues skip it.
+  // Ask the admin before committing so they can jump straight to conf champ.
+  if (newPhase === 'regular' && newSub === 14) {
+    const skipRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('advance_week15')
+        .setLabel('▶️ Continue to Week 15')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('advance_skip15')
+        .setLabel('⏭️ Skip to Conference Championship')
+        .setStyle(ButtonStyle.Primary),
+    );
+    const promptMsg = await interaction.editReply({
+      content: '**Week 15 Prompt**\nSome leagues skip Week 15. What would you like to do?',
+      components: [skipRow],
+    });
+    try {
+      const btn = await promptMsg.awaitMessageComponent({
+        filter: i => i.user.id === interaction.user.id,
+        time: 60000,
+      });
+      await btn.update({ components: [] });
+      if (btn.customId === 'advance_skip15') {
+        // Jump straight to Conference Championship
+        const confIdx = PHASE_CYCLE.findIndex(p => p.key === 'conf_champ');
+        newPhase = PHASE_CYCLE[confIdx].key;
+        newSub   = 0;
+      }
+      // else continue to Week 15 as normal
+    } catch {
+      await interaction.editReply({ content: '⏰ No response — advance cancelled. Run `/advance` again.', components: [] });
+      return;
+    }
   }
 
   const phaseLabel = formatPhase(newPhase, newSub);
