@@ -59,9 +59,9 @@ const client = new Client({
 // =====================================================
 const PHASE_CYCLE = [
   { key: 'preseason',           name: 'Preseason',               subWeeks: 1,  startSub: 0, format: ()    => 'Preseason' },
-  { key: 'regular',             name: 'Regular Season',          subWeeks: 16, startSub: 0, format: (sub) => `Week ${sub + 1}` },
+  { key: 'regular',             name: 'Regular Season',          subWeeks: 17, startSub: 0, format: (sub) => `Week ${sub}` },
   { key: 'conf_champ',          name: 'Conference Championship', subWeeks: 1,  startSub: 0, format: ()    => 'Conference Championship' },
-  { key: 'bowl',                name: 'Bowl Season',             subWeeks: 4,  startSub: 1, format: (sub) => {
+  { key: 'bowl',                name: 'Bowl Season',             subWeeks: 4,  startSub: 0, format: (sub) => {
     const labels = ['Bowl Week 1', 'Bowl Week 2', 'Semifinals', 'National Championship'];
     return labels[sub] ?? `Bowl Week ${sub + 1}`;
   }},
@@ -871,12 +871,12 @@ async function handleSetup(interaction) {
     if (phaseChoice === 'regular') {
       let validWeek = false;
       while (!validWeek) {
-        const weekStr = await ask('**[League 6/?]** What week of the regular season? (1–16)\nExample: `8`');
+        const weekStr = await ask('**[League 6/?]** What week of the regular season? (0–16)\nExample: `8`');
         if (!weekStr) return;
         const parsed = parseInt(weekStr);
-        if (!isNaN(parsed) && parsed >= 1 && parsed <= 16) {
+        if (!isNaN(parsed) && parsed >= 0 && parsed <= 16) {
           currentWeek = parsed;
-          currentSub  = parsed - 1;
+          currentSub  = parsed;
           validWeek   = true;
         } else {
           await dm.send('❌ Please enter a number between 1 and 16.');
@@ -2466,7 +2466,7 @@ async function handleAdvance(interaction) {
   // ── Week 15 skip prompt ───────────────────────────────────────────────────
   // Week 15 = sub_phase 14 in regular season (0-indexed). Some leagues skip it.
   // Ask the admin before committing so they can jump straight to conf champ.
-  if (newPhase === 'regular' && newSub === 14) {
+  if (newPhase === 'regular' && newSub === 15) {
     const skipRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId('advance_week15')
