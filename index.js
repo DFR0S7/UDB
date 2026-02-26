@@ -143,7 +143,7 @@ const CONFIG_DEFAULTS = {
   feature_any_game_result:      true,
   feature_ranking:              true,
   feature_ranking_all_time:     true,
-  feature_game_results_reminder:true,
+  feature_game_results_reminder:false,
   feature_job_offers:           true,
   feature_assign_team:          true,
   feature_reset_team:           true,
