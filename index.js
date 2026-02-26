@@ -58,15 +58,18 @@ const client = new Client({
 // PHASE CYCLE
 // =====================================================
 const PHASE_CYCLE = [
-  { key: 'preseason',           name: 'Preseason',               subWeeks: 1,  format: ()    => 'Preseason' },
-  { key: 'regular',             name: 'Regular Season',          subWeeks: 16, format: (sub) => `Week ${sub + 1}` },
-  { key: 'conf_champ',          name: 'Conference Championship', subWeeks: 1,  format: ()    => 'Conference Championship' },
-  { key: 'bowl',                name: 'Bowl Season',             subWeeks: 4,  format: (sub) => `Bowl Week ${sub + 1}` },
-  { key: 'players_leaving',     name: 'Players Leaving',         subWeeks: 1,  format: ()    => 'Players Leaving' },
-  { key: 'transfer_portal',     name: 'Transfer Portal',         subWeeks: 4,  format: (sub) => `Transfer Week ${sub + 1}` },
-  { key: 'position_changes',    name: 'Position Changes',        subWeeks: 1,  format: ()    => 'Position Changes' },
-  { key: 'training_results',    name: 'Training Results',        subWeeks: 1,  format: ()    => 'Training Results' },
-  { key: 'encourage_transfers', name: 'Encourage Transfers',     subWeeks: 1,  format: ()    => 'Encourage Transfers' },
+  { key: 'preseason',           name: 'Preseason',               subWeeks: 1,  startSub: 0, format: ()    => 'Preseason' },
+  { key: 'regular',             name: 'Regular Season',          subWeeks: 16, startSub: 0, format: (sub) => `Week ${sub + 1}` },
+  { key: 'conf_champ',          name: 'Conference Championship', subWeeks: 1,  startSub: 0, format: ()    => 'Conference Championship' },
+  { key: 'bowl',                name: 'Bowl Season',             subWeeks: 4,  startSub: 1, format: (sub) => {
+    const labels = ['Bowl Week 1', 'Bowl Week 2', 'Semifinals', 'National Championship'];
+    return labels[sub] ?? `Bowl Week ${sub + 1}`;
+  }},
+  { key: 'players_leaving',     name: 'Players Leaving',         subWeeks: 1,  startSub: 0, format: ()    => 'Players Leaving' },
+  { key: 'transfer_portal',     name: 'Transfer Portal',         subWeeks: 4,  startSub: 1, format: (sub) => `Transfer Week ${sub}` },
+  { key: 'position_changes',    name: 'Position Changes',        subWeeks: 1,  startSub: 0, format: ()    => 'Position Changes' },
+  { key: 'training_results',    name: 'Training Results',        subWeeks: 1,  startSub: 0, format: ()    => 'Training Results' },
+  { key: 'encourage_transfers', name: 'Encourage Transfers',     subWeeks: 1,  startSub: 0, format: ()    => 'Encourage Transfers' },
 ];
 
 const getPhaseByKey = (key) => PHASE_CYCLE.find(p => p.key === key) || PHASE_CYCLE[0];
@@ -554,10 +557,6 @@ function buildCommands() {
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .addStringOption(o => o.setName('hours').setDescription('Deadline window for this week').setRequired(true).setAutocomplete(true)),
 
-    new SlashCommandBuilder()
-      .setName('season-advance')
-      .setDescription('Advance to next season (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
     new SlashCommandBuilder()
       .setName('move-coach')
@@ -841,6 +840,52 @@ async function handleSetup(interaction) {
   );
   if (!leagueType) return;
 
+  // ── Established League: capture current season + week ────────────────────
+  let initialMeta = { season: 1, week: 1, current_phase: 'preseason', current_sub_phase: 0 };
+  if (leagueType === 'established') {
+    const seasonStr = await ask(
+      '**[League 4/?]** What season is your league currently in?\nExample: `3`'
+    );
+    if (!seasonStr) return;
+    const season = parseInt(seasonStr);
+    if (isNaN(season) || season < 1) {
+      await dm.send('❌ Invalid season number. Run `/setup` again.');
+      return;
+    }
+
+    const phaseChoice = await askButtons(
+      '**[League 5/?]** What phase is the league currently in?',
+      [
+        { id: 'preseason',    label: 'Preseason',                style: ButtonStyle.Secondary },
+        { id: 'regular',      label: 'Regular Season',           style: ButtonStyle.Primary },
+        { id: 'conf_champ',   label: 'Conference Championship',  style: ButtonStyle.Secondary },
+        { id: 'bowl',         label: 'Bowl Season',              style: ButtonStyle.Secondary },
+        { id: 'offseason',    label: 'Offseason (post-bowl)',    style: ButtonStyle.Secondary },
+      ]
+    );
+    if (!phaseChoice) return;
+
+    let currentWeek = 1;
+    let currentSub  = 0;
+
+    if (phaseChoice === 'regular') {
+      const weekStr = await ask('**[League 6/?]** What week of the regular season? (1–16)\nExample: `8`');
+      if (!weekStr) return;
+      currentWeek = parseInt(weekStr) || 1;
+      currentSub  = currentWeek - 1;
+    }
+
+    // Map offseason to the first offseason phase
+    const phaseKey = phaseChoice === 'offseason' ? 'players_leaving' : phaseChoice;
+
+    initialMeta = {
+      season:            season,
+      week:              currentWeek,
+      current_phase:     phaseKey,
+      current_sub_phase: currentSub,
+    };
+  }
+
   // ── Group-Based Feature Selection ────────────────────────────────────────
 
   // Helper: ask about one feature group — Enable All / Disable All / Customize
@@ -1032,16 +1077,24 @@ async function handleSetup(interaction) {
   let advanceConfig = { advance_intervals: '[24, 48]' };
 
   if (features.feature_advance) {
-    const intervals = await askWithDefault(
-      '**— Advance Management Setup —**\nWhat advance intervals (hours) should be available? Enter as a JSON array.\nExample: [24, 48] or [12, 24, 48]\nDefault: [24, 48]', '[24, 48]'
+    const intervalChoices = await askMultiButtons(
+      '**— Advance Management Setup —**\nWhich advance intervals (hours) should be available? Select all that apply.',
+      [
+        { id: '12', label: '12 hours' },
+        { id: '24', label: '24 hours' },
+        { id: '48', label: '48 hours' },
+        { id: '72', label: '72 hours' },
+      ]
     );
-    if (!intervals) return;
-    advanceConfig = { advance_intervals: intervals };
+    if (!intervalChoices) return;
+    const selectedIntervals = intervalChoices.length > 0 ? intervalChoices : ['24', '48'];
+    advanceConfig = { advance_intervals: JSON.stringify(selectedIntervals.map(Number)) };
   }
 
   // ── Save Config ───────────────────────────────────────────────────────────
   try {
     await createDefaultConfig(guildId, leagueName);
+    await setMeta(guildId, initialMeta);
     await saveConfig(guildId, {
       league_name:         leagueName,
       league_abbreviation: leagueAbbr,
@@ -1655,6 +1708,42 @@ async function handleAcceptOffer(interaction) {
 
   await interaction.editReply({ embeds: [successEmbed], components: [] });
 
+  // ── Prompt for stream handle if feature is enabled ───────────────────────
+  if (config.feature_stream_autopost && guild) {
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (member) {
+      try {
+        const platformRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('stream_platform_twitch').setLabel('Twitch').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('stream_platform_youtube').setLabel('YouTube').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('stream_platform_skip').setLabel('Skip').setStyle(ButtonStyle.Danger),
+        );
+        const streamPrompt = await member.send({
+          content:
+            `🎮 **One more thing!** Want to register your stream handle for **${offer.teams.team_name}**?\n` +
+            `This lets the bot tag you for game result reminders after your streams.\n\n` +
+            `What platform do you stream on?`,
+          components: [platformRow],
+        });
+        const platformBtn = await streamPrompt.awaitMessageComponent({ time: 120000 }).catch(() => null);
+        if (platformBtn && platformBtn.customId !== 'stream_platform_skip') {
+          const platform = platformBtn.customId === 'stream_platform_twitch' ? 'twitch' : 'youtube';
+          await platformBtn.update({ content: `Got it! What is your **${platform === 'twitch' ? 'Twitch' : 'YouTube'}** handle? (just the username, no URL)`, components: [] });
+          const handleMsg = await streamPrompt.channel.awaitMessages({ filter: m => m.author.id === userId, max: 1, time: 60000 }).catch(() => null);
+          const handle = handleMsg?.first()?.content?.trim().replace(/^@/, '');
+          if (handle) {
+            await setCoachStream(guildId, userId, handle, platform);
+            await member.send(`✅ Stream handle **${handle}** (${platform === 'twitch' ? 'Twitch' : 'YouTube'}) registered! Admins can view all handles with \`/streamer list\`.`);
+          }
+        } else if (platformBtn) {
+          await platformBtn.update({ content: 'No problem — you can register anytime with `/streamer register`.', components: [] });
+        }
+      } catch {
+        // DMs blocked or timed out — silently skip
+      }
+    }
+  }
+
   if (guild) {
     const signingEmbed = new EmbedBuilder()
       .setTitle(`✍️ Coach Signed — ${offer.teams.team_name}`)
@@ -1669,6 +1758,9 @@ async function handleAcceptOffer(interaction) {
 
     const target = findTextChannel(guild, config.channel_signed_coaches) || findTextChannel(guild, config.channel_news_feed);
     if (target) await target.send({ embeds: [signingEmbed] });
+
+    // Auto-update team list
+    await postTeamList(guild, guildId, config).catch(console.error);
   }
 }
 
@@ -2023,6 +2115,9 @@ async function handleAssignTeam(interaction) {
     const target = findTextChannel(guild, config.channel_signed_coaches) || findTextChannel(guild, config.channel_news_feed);
     if (target && target.id !== interaction.channelId) await target.send({ embeds: [embed] });
   }
+
+  // Auto-update team list
+  await postTeamList(guild, guildId, config).catch(console.error);
 }
 
 // /resetteam ──────────────────────────────────────────
@@ -2176,6 +2271,63 @@ async function handleListTeams(interaction) {
   );
 }
 
+// postTeamList — internal helper, no interaction object needed
+async function postTeamList(guild, guildId, config) {
+  if (!config.feature_list_teams) return;
+  const listsChannel = findTextChannel(guild, config.channel_team_lists);
+  if (!listsChannel) return;
+
+  let allTeams;
+  try { allTeams = await getAllTeams(guildId); } catch { return; }
+
+  const minRating = config.star_rating_for_offers     || 0;
+  const maxRating = config.star_rating_max_for_offers || 999;
+  const teams = allTeams.filter(t => t.user_id || (t.star_rating != null && parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating));
+
+  const confMap = {};
+  for (const t of teams) {
+    const conf = t.conference || 'Independent';
+    if (!confMap[conf]) confMap[conf] = [];
+    confMap[conf].push(t);
+  }
+
+  const fields = [];
+  for (const [conf, confTeams] of Object.entries(confMap).sort()) {
+    const lines = confTeams
+      .sort((a, b) => (b.star_rating || 0) - (a.star_rating || 0))
+      .map(t => t.user_id
+        ? `🏈 **${t.team_name}** — <@${t.user_id}> (${t.star_rating || '?'}⭐)`
+        : `🟢 **${t.team_name}** — Available (${t.star_rating || '?'}⭐)`
+      );
+    for (let i = 0; i < lines.length; i += 15) {
+      fields.push({ name: i === 0 ? `__${conf}__` : `__${conf} (cont.)__`, value: lines.slice(i, i + 15).join('\n'), inline: false });
+    }
+  }
+  if (fields.length === 0) return;
+
+  // Delete old bot messages in channel, post fresh
+  const PAGE = 25;
+  const embeds = [];
+  for (let i = 0; i < fields.length; i += PAGE) {
+    embeds.push(new EmbedBuilder()
+      .setTitle(i === 0 ? `📋 Team Availability — ${config.league_name}` : `📋 Team Availability (cont.)`)
+      .setColor(config.embed_color_primary_int || 0x1e90ff)
+      .setDescription(i === 0 ? `**${config.league_abbreviation || config.league_name}** · Updated <t:${Math.floor(Date.now()/1000)}:R>` : null)
+      .addFields(fields.slice(i, i + PAGE))
+      .setTimestamp()
+    );
+  }
+
+  try {
+    const messages = await listsChannel.messages.fetch({ limit: 100 });
+    for (const m of messages.filter(m => m.author.id === listsChannel.client.user.id).values()) {
+      await m.delete().catch(() => {});
+    }
+  } catch { /* ignore */ }
+
+  for (const embed of embeds) await listsChannel.send({ embeds: [embed] });
+}
+
 // /advance helpers ────────────────────────────────────
 async function postWeeklyRecap(guild, guildId, config, meta) {
   const newsChannel = findTextChannel(guild, config.channel_news_feed);
@@ -2251,11 +2403,27 @@ async function handleAdvance(interaction) {
   let newSeason = meta.season || 1;
 
   if (newSub >= phaseDef.subWeeks) {
-    const idx     = PHASE_CYCLE.findIndex(p => p.key === currentPhase);
-    const nextIdx = (idx + 1) % PHASE_CYCLE.length;
-    newPhase      = PHASE_CYCLE[nextIdx].key;
-    newSub        = 0;
-    if (newPhase === 'preseason') newSeason = newSeason + 1;
+    const idx      = PHASE_CYCLE.findIndex(p => p.key === currentPhase);
+    const nextIdx  = (idx + 1) % PHASE_CYCLE.length;
+    const nextPhase = PHASE_CYCLE[nextIdx];
+    newPhase       = nextPhase.key;
+    newSub         = nextPhase.startSub ?? 0;
+    if (newPhase === 'preseason') {
+      newSeason = newSeason + 1;
+      // Post season rollover announcement
+      const seasonEmbed = new EmbedBuilder()
+        .setTitle(`🏆 Season ${newSeason} Has Begun!`)
+        .setColor(config.embed_color_primary_int)
+        .setDescription(`Season **${meta.season}** is over! Welcome to **Season ${newSeason}**!\nWe are now in **Preseason**. Good luck!`)
+        .setTimestamp();
+      const advCh = findTextChannel(interaction.guild, config.channel_advance_tracker);
+      const newsCh = findTextChannel(interaction.guild, config.channel_news_feed);
+      const hcRoleName = (config.role_head_coach || 'head coach').trim();
+      const hcRole = interaction.guild.roles.cache.find(r => r.name.toLowerCase() === hcRoleName.toLowerCase());
+      const seasonMention = hcRole ? `<@&${hcRole.id}> ` : '@everyone ';
+      if (advCh) await advCh.send({ content: seasonMention, embeds: [seasonEmbed] });
+      if (newsCh && newsCh.id !== advCh?.id) await newsCh.send({ embeds: [seasonEmbed] });
+    }
   }
 
   // ── Week 15 skip prompt ───────────────────────────────────────────────────
@@ -2332,7 +2500,7 @@ async function handleAdvance(interaction) {
 
   await setMeta(guildId, {
     season:                newSeason,
-    week:                  newPhase === 'regular' ? newSub + 1 : meta.week,
+    week:                  newPhase === 'regular' ? newSub + 1 : (newPhase === 'preseason' ? 1 : meta.week),
     current_phase:         newPhase,
     current_sub_phase:     newSub,
     advance_hours:         hours,
@@ -2347,51 +2515,6 @@ async function handleAdvance(interaction) {
     await interaction.editReply({ content: `✅ Advance posted in ${advanceChannel}!` });
   } else {
     await interaction.editReply({ content: mention, embeds: [embed] });
-  }
-}
-// /season-advance ─────────────────────────────────────
-async function handleSeasonAdvance(interaction) {
-  await interaction.deferReply({ flags: 64 });
-  const guildId = interaction.guildId;
-  const config = await getConfig(guildId);
-  if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
-  if (!config.feature_season_advance) return interaction.editReply({ content: '❌ Season advance is disabled on this server.' });
-  const meta = await getMeta(guildId);
-
-  const newSeason = meta.season + 1;
-
-  await setMeta(guildId, {
-    season:               newSeason,
-    week:                 1,
-    current_phase:        'preseason',
-    current_sub_phase:    0,
-    advance_deadline:     null,
-    last_advance_at:      new Date().toISOString(),
-    next_advance_deadline: null,
-  });
-
-  const embed = new EmbedBuilder()
-    .setTitle(`🏆 Season ${newSeason} Has Begun!`)
-    .setColor(config.embed_color_primary_int)
-    .setDescription(`Season **${meta.season}** is over! Welcome to **Season ${newSeason}**!\nAll records reset. Good luck!`)
-    .setTimestamp();
-
-  const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
-  if (advanceChannel) {
-    const hcRoleName  = (config.role_head_coach || 'head coach').trim();
-    const hcRole      = interaction.guild.roles.cache.find(r => r.name.toLowerCase() === hcRoleName.toLowerCase());
-    const seasonMention = hcRole ? `<@&${hcRole.id}> ` : '@everyone ';
-
-    await advanceChannel.send({ content: seasonMention, embeds: [embed] });
-    await interaction.editReply({ content: `✅ Season advance posted in ${advanceChannel}!` });
-  } else {
-    await interaction.editReply({ embeds: [embed] });
-  }
-
-  // Also post to news-feed (optional but recommended)
-  const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
-  if (newsChannel && newsChannel.id !== advanceChannel?.id) {
-    await newsChannel.send({ embeds: [embed] });
   }
 }
 // /move-coach ─────────────────────────────────────────
@@ -2535,13 +2658,7 @@ async function handleHelp(interaction) {
       usage:     '/advance hours: <n>',
       desc:      "Advance the league to the next phase/week and set a deadline. The bot posts the new phase and deadline to the advance tracker channel.",
     },
-    {
-      flag:      'feature_season_advance',
-      adminOnly: true,
-      title:     '🏆 `/season-advance`',
-      usage:     '/season-advance',
-      desc:      "Manually advance to the next season, resetting to Season X, Week 1, Preseason.",
-    },
+
     // ── Streaming ──────────────────────────────────────────────────────────
     {
       flag:      'feature_stream_autopost',
@@ -2958,7 +3075,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'resetteam':         return handleResetTeam(interaction);
         case 'listteams':         return handleListTeams(interaction);
         case 'advance':           return handleAdvance(interaction);
-        case 'season-advance':    return handleSeasonAdvance(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
         case 'streamer':          return handleStreaming(interaction);
         case 'config':
