@@ -1000,17 +1000,37 @@ async function handleListStreamers(interaction) {
     return interaction.editReply('No coaches have set a streaming link yet.');
   }
 
-  const platformEmoji = { twitch: '🟣', youtube: '🔴', kick: '🟢', facebook: '🔵', tiktok: '⚫', other: '📺' };
-
   // Use cached members only — no serial API calls
-  const lines = streamers.map(entry => {
+  const rows = streamers.map(entry => {
     const member = interaction.guild.members.cache.get(entry.user_id);
-    const name   = member?.displayName ?? `<@${entry.user_id}>`;
-    const emoji  = platformEmoji[entry.platform] || '📺';
-    return `${emoji} **${name}** → ${entry.stream_url}`;
+    const name   = member?.displayName ?? `Unknown (${entry.user_id})`;
+    return { name, url: entry.stream_url };
   });
 
-  await interaction.editReply({ content: `**Streamers (${lines.length})**\n${lines.join('\n')}` });
+  // Align columns: pad coach names to the longest name width
+  const maxLen = Math.max(...rows.map(r => r.name.length));
+  const tableLines = rows.map(r => `${r.name.padEnd(maxLen)}  ${r.url}`);
+  const header     = `${'Coach'.padEnd(maxLen)}  URL`;
+  const divider    = `${'-'.repeat(maxLen)}  ${'-'.repeat(40)}`;
+  const table      = [header, divider, ...tableLines].join('\n');
+
+  // Discord has a 2000 char message limit — split if needed
+  const block = '```\n' + table + '\n```';
+  if (block.length <= 2000) {
+    await interaction.editReply({ content: `**Streamers (${rows.length})**\n${block}` });
+  } else {
+    // Split into chunks
+    await interaction.editReply({ content: `**Streamers (${rows.length})** — copy the table below:` });
+    let chunk = '```\n' + header + '\n' + divider + '\n';
+    for (const line of tableLines) {
+      if ((chunk + line + '\n```').length > 2000) {
+        await interaction.followUp({ content: chunk + '```', flags: 64 });
+        chunk = '```\n';
+      }
+      chunk += line + '\n';
+    }
+    if (chunk !== '```\n') await interaction.followUp({ content: chunk + '```', flags: 64 });
+  }
 }
 
 // /config view ────────────────────────────────────────
