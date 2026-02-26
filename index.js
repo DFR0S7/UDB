@@ -869,10 +869,31 @@ async function handleSetup(interaction) {
     let currentSub  = 0;
 
     if (phaseChoice === 'regular') {
-      const weekStr = await ask('**[League 6/?]** What week of the regular season? (1–16)\nExample: `8`');
-      if (!weekStr) return;
-      currentWeek = parseInt(weekStr) || 1;
-      currentSub  = currentWeek - 1;
+      let validWeek = false;
+      while (!validWeek) {
+        const weekStr = await ask('**[League 6/?]** What week of the regular season? (1–16)\nExample: `8`');
+        if (!weekStr) return;
+        const parsed = parseInt(weekStr);
+        if (!isNaN(parsed) && parsed >= 1 && parsed <= 16) {
+          currentWeek = parsed;
+          currentSub  = parsed - 1;
+          validWeek   = true;
+        } else {
+          await dm.send('❌ Please enter a number between 1 and 16.');
+        }
+      }
+    } else if (phaseChoice === 'bowl') {
+      const bowlChoice = await askButtons(
+        '**[League 6/?]** Which bowl week?',
+        [
+          { id: '0', label: 'Bowl Week 1',          style: ButtonStyle.Secondary },
+          { id: '1', label: 'Bowl Week 2',          style: ButtonStyle.Secondary },
+          { id: '2', label: 'Semifinals',           style: ButtonStyle.Secondary },
+          { id: '3', label: 'National Championship', style: ButtonStyle.Primary },
+        ]
+      );
+      if (!bowlChoice) return;
+      currentSub = parseInt(bowlChoice);
     }
 
     // Map offseason to the first offseason phase
@@ -931,11 +952,11 @@ async function handleSetup(interaction) {
     { label: 'Streamer List',     id: 'feature_streaming_list' },
   ];
 
-  if (leagueType === 'established') await dm.send('💡 **Game Day** — Enable this if you want coaches to record game results. You can always turn it on later via `/config features`.');
+  if (leagueType === 'established') await dm.send('💡 **Game Day — Recommendation:** Enable this if you want coaches to record game results. You can always turn it on later via `/config features`.');
   const gameDayEnabled   = await askGroupFeatures('Game Day',           '🏈', gameDayCmds);
   if (gameDayEnabled === null) return;
-  if (leagueType === 'established') await dm.send('💡 **Team Selection** — Focus here first. Enable **Assign Team** to map existing coaches to their teams directly. You likely won\'t need Job Offers unless you\'re still growing.');
-  else await dm.send('💡 **Team Selection** — Focus here first. Enable **Job Offers** so coaches can request and accept teams through the bot.');
+  if (leagueType === 'established') await dm.send('💡 **Team Selection — Recommendation:** Enable **Assign Team** to map existing coaches to their teams directly. You likely won\'t need Job Offers unless you\'re still growing.');
+  else await dm.send('💡 **Team Selection — Recommendation:** Enable **Job Offers** so coaches can request and accept teams through the bot.');
   const teamEnabled      = await askGroupFeatures('Team Selection',     '👥', teamCmds);
   if (teamEnabled === null) return;
   const advanceEnabled   = await askGroupFeatures('Advance Management', '📅', advanceCmds);
@@ -1038,10 +1059,34 @@ async function handleSetup(interaction) {
   if (features.feature_job_offers) {
     await dm.send('**— Job Offers Setup —**\nAnswer the next 4 questions to configure job offers.');
 
-    const starMin = await askWithDefault('**[Job Offers 1/4]** Minimum star rating for job offers? (1.0 – 5.0)\nDefault: 2.5', '2.5');
-    if (!starMin) return;
-    const starMax = await askWithDefault('**[Job Offers 2/4]** Maximum star rating? Type none for no cap.\nDefault: none', 'none');
-    if (!starMax) return;
+    let starMin;
+    while (!starMin) {
+      const input = await askWithDefault('**[Job Offers 1/4]** Minimum star rating for job offers? (1.0 – 5.0)\nDefault: 2.5', '2.5');
+      if (!input) return;
+      const val = parseFloat(input);
+      if (!isNaN(val) && val >= 1.0 && val <= 5.0) {
+        starMin = input;
+      } else {
+        await dm.send('❌ Please enter a number between 1.0 and 5.0 (e.g. `2.5`).');
+      }
+    }
+
+    let starMax;
+    while (!starMax) {
+      const input = await askWithDefault('**[Job Offers 2/4]** Maximum star rating? Type `none` for no cap.\nDefault: none', 'none');
+      if (!input) return;
+      if (input.toLowerCase() === 'none') {
+        starMax = 'none';
+      } else {
+        const val = parseFloat(input);
+        const minVal = parseFloat(starMin);
+        if (!isNaN(val) && val >= minVal && val <= 5.0) {
+          starMax = input;
+        } else {
+          await dm.send(`❌ Please enter a number between ${starMin} and 5.0, or type \`none\` for no cap.`);
+        }
+      }
+    }
     const offersCount = await askWithDefault('**[Job Offers 3/4]** How many offers should each user receive?\nDefault: 3', '3');
     if (!offersCount) return;
     const offersExpiry = await askWithDefault('**[Job Offers 4/4]** How many hours should offers last before expiring? (1–24)\nDefault: 24', '24');
