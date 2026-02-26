@@ -907,28 +907,7 @@ async function handleSetup(interaction) {
     );
   };
 
-  // Build recommendation message based on league type
-  let featureGuidance;
-  if (leagueType === 'new') {
-    featureGuidance =
-      '**— Feature Setup —**\n' +
-      'Configure each feature group one at a time.\n\n' +
-      '💡 **New League recommendation:**\n' +
-      'Since you\'re starting fresh, focus on **👥 Team Selection** — specifically ' +
-      '**Job Offers** so coaches can request and accept teams through the bot. ' +
-      'Enable **🏈 Game Day** once teams are assigned and play has started. ' +
-      'Nothing is on by default — enable only what you need.';
-  } else {
-    featureGuidance =
-      '**— Feature Setup —**\n' +
-      'Configure each feature group one at a time.\n\n' +
-      '💡 **Established League recommendation:**\n' +
-      'Since coaches already have teams, focus on **👥 Team Selection** — specifically ' +
-      '**Assign Team** so you can map existing coaches to their teams directly. ' +
-      'You likely won\'t need Job Offers unless you\'re still growing. Enable **🏈 Game Day** if you want coaches ' +
-      'to record game results. Nothing is on by default — enable only what you need.';
-  }
-  await dm.send(featureGuidance);
+  await dm.send('**— Feature Setup —**\nConfigure each feature group one at a time. Nothing is on by default — enable only what you need.');
 
   const gameDayCmds = [
     { label: 'Game Result',           id: 'feature_game_result' },
@@ -945,21 +924,23 @@ async function handleSetup(interaction) {
     { label: 'Move Coach',  id: 'feature_move_coach' },
   ];
   const advanceCmds = [
-    { label: 'Advance',        id: 'feature_advance' },
-    { label: 'Season Advance', id: 'feature_season_advance' },
+    { label: 'Advance', id: 'feature_advance' },
   ];
   const streamingCmds = [
     { label: 'Streamer Register', id: 'feature_stream_autopost' },
     { label: 'Streamer List',     id: 'feature_streaming_list' },
   ];
 
+  if (leagueType === 'established') await dm.send('💡 **Game Day** — Enable this if you want coaches to record game results. You can always turn it on later via `/config features`.');
   const gameDayEnabled   = await askGroupFeatures('Game Day',           '🏈', gameDayCmds);
   if (gameDayEnabled === null) return;
+  if (leagueType === 'established') await dm.send('💡 **Team Selection** — Focus here first. Enable **Assign Team** to map existing coaches to their teams directly. You likely won\'t need Job Offers unless you\'re still growing.');
+  else await dm.send('💡 **Team Selection** — Focus here first. Enable **Job Offers** so coaches can request and accept teams through the bot.');
   const teamEnabled      = await askGroupFeatures('Team Selection',     '👥', teamCmds);
   if (teamEnabled === null) return;
   const advanceEnabled   = await askGroupFeatures('Advance Management', '📅', advanceCmds);
   if (advanceEnabled === null) return;
-  const streamingEnabled = await askGroupFeatures('Autopost Streams', '📡', streamingCmds);
+  const streamingEnabled = await askGroupFeatures('Autopost Streams (Wamellow)', '📡', streamingCmds);
   if (streamingEnabled === null) return;
 
   const allEnabled = [...gameDayEnabled, ...teamEnabled, ...advanceEnabled, ...streamingEnabled];
@@ -976,7 +957,6 @@ async function handleSetup(interaction) {
     feature_list_teams:            allEnabled.includes('feature_list_teams'),
     feature_move_coach:            allEnabled.includes('feature_move_coach'),
     feature_advance:               allEnabled.includes('feature_advance'),
-    feature_season_advance:        allEnabled.includes('feature_season_advance'),
     feature_stream_autopost:       allEnabled.includes('feature_stream_autopost'),
     feature_streaming_list:        allEnabled.includes('feature_streaming_list'),
   };
@@ -993,7 +973,7 @@ async function handleSetup(interaction) {
   const needsNewsFeed  = features.feature_ranking || features.feature_ranking_all_time || features.feature_game_result;
   const needsSigned    = features.feature_job_offers || features.feature_assign_team;
   const needsTeamList  = features.feature_list_teams;
-  const needsAdvance   = features.feature_advance || features.feature_season_advance;
+  const needsAdvance   = features.feature_advance;
   const needsStreaming = features.feature_game_results_reminder || features.feature_stream_autopost || features.feature_streaming_list;
 
   if (needsNewsFeed || needsSigned || needsTeamList || needsAdvance || needsStreaming) {
@@ -1031,12 +1011,25 @@ async function handleSetup(interaction) {
   let headCoachRoleId   = null;
 
   if (roles.length > 0) {
-    const role = await pickRole('**— Role Setup —**\nWhich role should be assigned to head coaches?', roles);
-    if (!role) return;
-    headCoachRoleName = role.name;
-    headCoachRoleId   = role.id;
+    const skipRoleChoice = await askButtons(
+      '**— Role Setup —**\nShould the bot assign a role to head coaches when they are signed?\n\n' +
+      'Choose **Pick a Role** to assign an existing role, or **Skip** if your server uses @everyone.',
+      [
+        { id: 'pick', label: '🎭 Pick a Role', style: ButtonStyle.Primary },
+        { id: 'skip', label: '⏭️ Skip (@everyone)', style: ButtonStyle.Secondary },
+      ]
+    );
+    if (!skipRoleChoice) return;
+
+    if (skipRoleChoice === 'pick') {
+      const role = await pickRole('Which role should be assigned to head coaches?', roles);
+      if (!role) return;
+      headCoachRoleName = role.name;
+      headCoachRoleId   = role.id;
+    }
+    // skip → leave defaults ('head coach', null) — bot won't assign a role
   } else {
-    await dm.send('⚠️ No roles found. The bot will create a "head coach" role automatically when the first coach is assigned.');
+    await dm.send('⚠️ No roles found. The bot will skip role assignment — coaches will use @everyone.');
   }
 
   // ── Job Offers Config ─────────────────────────────────────────────────────
@@ -1133,11 +1126,11 @@ async function handleSetup(interaction) {
       },
       {
         name: '📅 Advance Management',
-        value: `${fv('feature_advance')} Advance  ${fv('feature_season_advance')} Season Advance`,
+        value: `${fv('feature_advance')} Advance`,
         inline: false,
       },
       {
-        name: '📡 Autopost Streams',
+        name: '📡 Autopost Streams (Wamellow)',
         value: `${fv('feature_stream_autopost')} Streamer Register  ${fv('feature_streaming_list')} Streamer List`,
         inline: false,
       },
@@ -1161,7 +1154,6 @@ async function handleSetup(interaction) {
       );
     }
     if (features.feature_game_results_reminder) summaryFields.push({ name: 'Results Reminder',  value: streamConfig.stream_reminder_minutes + ' min', inline: true });
-    if (features.feature_advance)               summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals,               inline: true });
     if (features.feature_advance)               summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals,               inline: true });
 
     const embed = new EmbedBuilder()
@@ -1282,7 +1274,7 @@ async function handleConfigView(interaction) {
         `🏈 ${config.feature_game_result ? '✅' : '❌'} Game Result  ${config.feature_any_game_result ? '✅' : '❌'} Any Game Result\n` +
         `${config.feature_ranking ? '✅' : '❌'} Ranking  ${config.feature_ranking_all_time ? '✅' : '❌'} All-Time  ${config.feature_game_results_reminder ? '✅' : '❌'} Reminder\n` +
         `👥 ${config.feature_job_offers ? '✅' : '❌'} Job Offers  ${config.feature_assign_team ? '✅' : '❌'} Assign  ${config.feature_reset_team ? '✅' : '❌'} Reset  ${config.feature_list_teams ? '✅' : '❌'} List  ${config.feature_move_coach ? '✅' : '❌'} Move\n` +
-        `📅 ${config.feature_advance ? '✅' : '❌'} Advance  ${config.feature_season_advance ? '✅' : '❌'} Season Advance\n` +
+        `📅 ${config.feature_advance ? '✅' : '❌'} Advance\n` +
         `📡 ${config.feature_stream_autopost ? '✅' : '❌'} Streamer Register  ${config.feature_streaming_list ? '✅' : '❌'} Streamer List`,
         inline: false },
       { name: '📺 Channels', value:
@@ -1333,13 +1325,12 @@ const FEATURE_GROUPS = [
     key:   'advance',
     label: '📅 Advance Management',
     commands: [
-      { id: 'feature_advance',        label: 'Advance',        desc: 'Advance to next week/phase' },
-      { id: 'feature_season_advance', label: 'Season Advance', desc: 'Advance to next season' },
+      { id: 'feature_advance', label: 'Advance', desc: 'Advance to next week/phase — season rolls over automatically' },
     ],
   },
   {
     key:   'autopost_streams',
-    label: '📡 Autopost Streams',
+    label: '📡 Autopost Streams (Wamellow)',
     commands: [
       { id: 'feature_stream_autopost',  label: 'Streamer Register', desc: 'Store handle for use with Wamellow' },
       { id: 'feature_streaming_list',   label: 'Streamer List',   desc: '/streamer list for Wamellow' },
