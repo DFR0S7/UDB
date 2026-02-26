@@ -2053,9 +2053,10 @@ async function handleRankingAllTime(interaction) {
 // /assign-team ────────────────────────────────────────
 async function handleAssignTeam(interaction) {
   const guildId  = interaction.guildId;
+  await interaction.deferReply({ flags: 64 });
   const config   = await getConfig(guildId);
-  if (!config.setup_complete) return interaction.reply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.', flags: 64 });
-  if (!config.feature_assign_team) return interaction.reply({ content: '❌ Team assignment is disabled on this server.', flags: 64 });
+  if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
+  if (!config.feature_assign_team) return interaction.editReply({ content: '❌ Team assignment is disabled on this server.' });
   const guild    = interaction.guild;
   const user     = interaction.options.getUser('user');
   const teamName = interaction.options.getString('team');
@@ -2165,8 +2166,8 @@ async function handleResetTeam(interaction) {
 // /listteams ──────────────────────────────────────────
 async function handleListTeams(interaction) {
   const guildId = interaction.guildId;
-  const config  = await getConfig(guildId);
   await interaction.deferReply({ flags: 64 });
+  const config  = await getConfig(guildId);
   if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_list_teams) return interaction.editReply({ content: '❌ Team listing is disabled on this server.' });
 
@@ -2511,13 +2512,12 @@ async function handleAdvance(interaction) {
 // /move-coach ─────────────────────────────────────────
 async function handleMoveCoach(interaction) {
   const guildId     = interaction.guildId;
+  await interaction.deferReply({ flags: 64 });
   const config      = await getConfig(guildId);
-  if (!config.setup_complete) return interaction.reply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.', flags: 64 });
-  if (!config.feature_move_coach) return interaction.reply({ content: '❌ Move coach is disabled on this server.', flags: 64 });
+  if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
+  if (!config.feature_move_coach) return interaction.editReply({ content: '❌ Move coach is disabled on this server.' });
   const coachId     = interaction.options.getString('coach');
   const newTeamName = interaction.options.getString('new-team');
-
-  await interaction.deferReply();
 
   const user = await interaction.guild.members.fetch(coachId).then(m => m.user).catch(() => null);
   if (!user) return interaction.editReply('❌ **Coach Not Found**\nThis user couldn\'t be fetched from the server. They may have left.\n\nIf they\'re still in the server, try running `/move-coach` again and selecting from the autocomplete list.');
@@ -2762,10 +2762,9 @@ async function handleHelp(interaction) {
 async function handleCheckPermissions(interaction) {
   const guildId   = interaction.guildId;
   const guild     = interaction.guild;
+  await interaction.deferReply({ flags: 64 });
   const config    = await getConfig(guildId);
   const botMember = guild.members.cache.get(client.user.id) || await guild.members.fetch(client.user.id);
-
-  await interaction.deferReply({ flags: 64 });
 
   const REQUIRED = ['ViewChannel', 'SendMessages', 'EmbedLinks', 'ReadMessageHistory'];
 
