@@ -134,30 +134,45 @@ const guildConfigs = new Map();
 
 // Single source of truth for default config values
 const CONFIG_DEFAULTS = {
-  league_name:               'Dynasty League',
-  league_abbreviation:       '',
-  feature_job_offers:        true,
-  feature_stream_reminders:  true,
-  feature_streaming:          true,
-  feature_advance_system:    true,
-  feature_press_releases:    true,
-  feature_rankings:          true,
-  channel_news_feed:         'news-feed',
-  channel_advance_tracker:   'advance-tracker',
-  channel_team_lists:        'team-lists',
-  channel_signed_coaches:    'signed-coaches',
-  channel_streaming:         'streaming',
-  role_head_coach:           'head coach',
-  role_head_coach_id:        null,
-  star_rating_for_offers:    2.5,
-  star_rating_max_for_offers: null,
-  job_offers_count:          3,
-  job_offers_expiry_hours:   48,
-  stream_reminder_minutes:   45,
-  advance_intervals:         '[24, 48]',
-  embed_color_primary:       '0x1e90ff',
-  embed_color_win:           '0x00ff00',
-  embed_color_loss:          '0xff0000',
+  league_name:                  'Dynasty League',
+  league_abbreviation:          '',
+  setup_complete:               false,
+  // ── Feature flags ─────────────────────────────
+  feature_game_result:          true,
+  feature_any_game_result:      true,
+  feature_ranking:              true,
+  feature_ranking_all_time:     true,
+  feature_game_results_reminder:true,
+  feature_job_offers:           true,
+  feature_assign_team:          true,
+  feature_reset_team:           true,
+  feature_list_teams:           true,
+  feature_move_coach:           true,
+  feature_advance:              true,
+  feature_season_advance:       true,
+  feature_stream_autopost:      true,
+  feature_streaming_list:       true,
+  // ── Channels ──────────────────────────────────
+  channel_news_feed:            'news-feed',
+  channel_advance_tracker:      'advance-tracker',
+  channel_team_lists:           'team-lists',
+  channel_signed_coaches:       'signed-coaches',
+  channel_streaming:            'streaming',
+  // ── Roles ─────────────────────────────────────
+  role_head_coach:              'head coach',
+  role_head_coach_id:           null,
+  // ── Job Offers ────────────────────────────────
+  star_rating_for_offers:       2.5,
+  star_rating_max_for_offers:   null,
+  job_offers_count:             3,
+  job_offers_expiry_hours:      48,
+  // ── Stream / Advance ──────────────────────────
+  stream_reminder_minutes:      45,
+  advance_intervals:            '[24, 48]',
+  // ── Embed colors ──────────────────────────────
+  embed_color_primary:          '0x1e90ff',
+  embed_color_win:              '0x00ff00',
+  embed_color_loss:             '0xff0000',
 };
 
 function parseConfig(data) {
@@ -173,7 +188,6 @@ function parseConfig(data) {
   } catch (_) {
     console.warn(`[config] Could not parse advance_intervals: "${data.advance_intervals}" — using default [24, 48]`);
   }
-  console.log(`[config] advance_intervals for guild ${data.guild_id}: "${data.advance_intervals}" → parsed as [${intervals}]`);
   return {
     ...data,
     advance_intervals_parsed: intervals,
@@ -204,7 +218,6 @@ async function loadGuildConfig(guildId) {
 
   const parsed = parseConfig(data);
   guildConfigs.set(guildId, parsed);
-  console.log(`[config] Loaded config for guild ${guildId}: ${data.league_name}`);
   return parsed;
 }
 
@@ -404,22 +417,13 @@ async function upsertRecord(record) {
 // COACH STREAM HELPERS
 // =====================================================
 
-async function setCoachStream(guildId, userId, streamUrl) {
-  let platform = 'other';
-  const urlLower = streamUrl.toLowerCase();
-
-  if (urlLower.includes('twitch.tv'))       platform = 'twitch';
-  else if (urlLower.includes('youtube.com') || urlLower.includes('youtu.be')) platform = 'youtube';
-  else if (urlLower.includes('kick.com'))   platform = 'kick';
-  else if (urlLower.includes('facebook.com/live')) platform = 'facebook';
-  else if (urlLower.includes('tiktok.com')) platform = 'tiktok';
-
+async function setCoachStream(guildId, userId, handle, platform = 'twitch') {
   const { error } = await supabase.from('coach_streams').upsert({
-    guild_id: guildId,
-    user_id: userId,
-    stream_url: streamUrl.trim(),
+    guild_id:   guildId,
+    user_id:    userId,
+    stream_url: handle.trim(),  // stream_url column stores the handle
     platform,
-    updated_at: new Date().toISOString()
+    updated_at: new Date().toISOString(),
   }, { onConflict: 'guild_id,user_id' });
 
   if (error) throw error;
@@ -431,6 +435,18 @@ async function removeCoachStream(guildId, userId) {
     .delete()
     .eq('guild_id', guildId)
     .eq('user_id', userId);
+}
+
+async function getStreamerByHandle(guildId, handle) {
+  // Match handle case-insensitively against stream_url (which stores the handle)
+  const { data, error } = await supabase
+    .from('coach_streams')
+    .select('user_id, stream_url, platform')
+    .eq('guild_id', guildId);
+
+  if (error || !data) return null;
+  const normalised = handle.toLowerCase().replace(/^\//, '');
+  return data.find(r => r.stream_url.toLowerCase() === normalised) || null;
 }
 
 async function getAllStreamers(guildId) {
@@ -483,11 +499,6 @@ function buildCommands() {
       .addIntegerOption(o => o.setName('your-score').setDescription('Your score').setRequired(true))
       .addIntegerOption(o => o.setName('opponent-score').setDescription('Opponent score').setRequired(true))
       .addStringOption(o => o.setName('summary').setDescription('Optional game summary or highlights').setRequired(false).setMaxLength(500)),
-
-    new SlashCommandBuilder()
-      .setName('press-release')
-      .setDescription('Post a press release announcement')
-      .addStringOption(o => o.setName('message').setDescription('Your announcement').setRequired(true)),
 
     new SlashCommandBuilder()
       .setName('ranking')
@@ -565,21 +576,38 @@ function buildCommands() {
       .addIntegerOption(o => o.setName('week').setDescription('Week number (defaults to current week)').setRequired(false).setMinValue(1)),
 
     new SlashCommandBuilder()
+      .setName('help')
+      .setDescription('View available commands and how to use them'),
+
+    new SlashCommandBuilder()
       .setName('checkpermissions')
       .setDescription('Check if the bot has all required permissions (Admin only)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
     new SlashCommandBuilder()
-      .setName('streaming')
-      .setDescription('Streaming commands for Wamellow integration')
+      .setName('streamer')
+      .setDescription('Streamer commands for Wamellow integration')
       .addSubcommand(sub => sub
-        .setName('set')
-        .setDescription('Save your stream URL (Twitch, YouTube, Kick, etc.)')
-        .addStringOption(o => o.setName('url').setDescription('Your full stream URL').setRequired(true))
+        .setName('register')
+        .setDescription('Streamer Registration — save your Twitch or YouTube handle')
+        .addStringOption(o =>
+          o.setName('platform')
+           .setDescription('Your streaming platform')
+           .setRequired(true)
+           .addChoices(
+             { name: 'Twitch',  value: 'twitch' },
+             { name: 'YouTube', value: 'youtube' },
+           )
+        )
+        .addStringOption(o =>
+          o.setName('handle')
+           .setDescription('Your username/handle (e.g. johndoe — no URL needed)')
+           .setRequired(true)
+        )
       )
       .addSubcommand(sub => sub
         .setName('list')
-        .setDescription('List all coaches and their stream URLs')
+        .setDescription('Streamer List — show all coaches, their Discord name, and handle')
       ),
     
   ].map(cmd => cmd.toJSON());
@@ -603,6 +631,19 @@ async function registerCommands() {
 // =====================================================
 // COMMAND HANDLERS
 // =====================================================
+
+// Setup gate — returned to user-facing handlers when setup hasn't been run
+async function replySetupRequired(interaction) {
+  const msg = {
+    content:
+      '⚙️ **Setup Required**\n' +
+      "This bot hasn't been configured for this server yet.\n" +
+      'An admin needs to run `/setup` to get started.',
+    flags: 64,
+  };
+  if (interaction.deferred || interaction.replied) return interaction.editReply(msg);
+  return interaction.reply(msg);
+}
 
 // /setup ──────────────────────────────────────────────
 async function handleSetup(interaction) {
@@ -783,32 +824,81 @@ async function handleSetup(interaction) {
   const leagueAbbr = await ask('**[League 2/2]** What is your league abbreviation or keyword?\nExample: CMR');
   if (!leagueAbbr) return;
 
-  // ── Feature Selection ─────────────────────────────────────────────────────
-  const featureOptions = [
-    { label: 'Job Offers',       id: 'job_offers' },
-    { label: 'Stream Reminders', id: 'stream_reminders' },
-    { label: 'Streaming',        id: 'streaming' },
-    { label: 'Advance System',   id: 'advance_system' },
-    { label: 'Press Releases',   id: 'press_releases' },
-    { label: 'Rankings',         id: 'rankings' },
-  ];
+  // ── Group-Based Feature Selection ────────────────────────────────────────
 
-  const selectedFeatures = await askMultiButtons(
-    '**— Feature Selection —**\nToggle features on/off then click ✔ Done. Click **Select All** to enable everything.',
-    featureOptions
-  );
-  if (!selectedFeatures) return;
-
-  const features = {
-    feature_job_offers:       selectedFeatures.includes('job_offers'),
-    feature_stream_reminders: selectedFeatures.includes('stream_reminders'),
-    feature_streaming:        selectedFeatures.includes('streaming'),
-    feature_advance_system:   selectedFeatures.includes('advance_system'),
-    feature_press_releases:   selectedFeatures.includes('press_releases'),
-    feature_rankings:         selectedFeatures.includes('rankings'),
+  // Helper: ask about one feature group — Enable All / Disable All / Customize
+  const askGroupFeatures = async (groupLabel, groupEmoji, commands) => {
+    const choice = await askButtons(
+      `${groupEmoji} **${groupLabel}**\nEnable this feature group?\nIncludes: ${commands.map(c => c.label).join(', ')}`,
+      [
+        { id: 'all',    label: '✅ Enable All',  style: ButtonStyle.Success },
+        { id: 'none',   label: '❌ Disable All', style: ButtonStyle.Danger },
+        { id: 'custom', label: '🔧 Customize',   style: ButtonStyle.Secondary },
+      ]
+    );
+    if (!choice) return null;
+    if (choice === 'all')  return commands.map(c => c.id);
+    if (choice === 'none') return [];
+    return await askMultiButtons(
+      `🔧 **${groupLabel} — Customize**\nSelect which commands to enable:`,
+      commands
+    );
   };
 
-  // ── Channel Setup (only for enabled features) ─────────────────────────────
+  await dm.send('**— Feature Setup —**\nConfigure each feature group one at a time.');
+
+  const gameDayCmds = [
+    { label: 'Game Result',           id: 'feature_game_result' },
+    { label: 'Any Game Result',       id: 'feature_any_game_result' },
+    { label: 'Ranking',               id: 'feature_ranking' },
+    { label: 'All-Time Ranking',      id: 'feature_ranking_all_time' },
+    { label: 'Game Results Reminder', id: 'feature_game_results_reminder' },
+  ];
+  const teamCmds = [
+    { label: 'Job Offers',  id: 'feature_job_offers' },
+    { label: 'Assign Team', id: 'feature_assign_team' },
+    { label: 'Reset Team',  id: 'feature_reset_team' },
+    { label: 'List Teams',  id: 'feature_list_teams' },
+    { label: 'Move Coach',  id: 'feature_move_coach' },
+  ];
+  const advanceCmds = [
+    { label: 'Advance',        id: 'feature_advance' },
+    { label: 'Season Advance', id: 'feature_season_advance' },
+  ];
+  const streamingCmds = [
+    { label: 'Streamer Register', id: 'feature_stream_autopost' },
+    { label: 'Streamer List',     id: 'feature_streaming_list' },
+  ];
+
+  const gameDayEnabled   = await askGroupFeatures('Game Day',           '🏈', gameDayCmds);
+  if (gameDayEnabled === null) return;
+  const teamEnabled      = await askGroupFeatures('Team Selection',     '👥', teamCmds);
+  if (teamEnabled === null) return;
+  const advanceEnabled   = await askGroupFeatures('Advance Management', '📅', advanceCmds);
+  if (advanceEnabled === null) return;
+  const streamingEnabled = await askGroupFeatures('Autopost Streams', '📡', streamingCmds);
+  if (streamingEnabled === null) return;
+
+  const allEnabled = [...gameDayEnabled, ...teamEnabled, ...advanceEnabled, ...streamingEnabled];
+
+  const features = {
+    feature_game_result:           allEnabled.includes('feature_game_result'),
+    feature_any_game_result:       allEnabled.includes('feature_any_game_result'),
+    feature_ranking:               allEnabled.includes('feature_ranking'),
+    feature_ranking_all_time:      allEnabled.includes('feature_ranking_all_time'),
+    feature_game_results_reminder: allEnabled.includes('feature_game_results_reminder'),
+    feature_job_offers:            allEnabled.includes('feature_job_offers'),
+    feature_assign_team:           allEnabled.includes('feature_assign_team'),
+    feature_reset_team:            allEnabled.includes('feature_reset_team'),
+    feature_list_teams:            allEnabled.includes('feature_list_teams'),
+    feature_move_coach:            allEnabled.includes('feature_move_coach'),
+    feature_advance:               allEnabled.includes('feature_advance'),
+    feature_season_advance:        allEnabled.includes('feature_season_advance'),
+    feature_stream_autopost:       allEnabled.includes('feature_stream_autopost'),
+    feature_streaming_list:        allEnabled.includes('feature_streaming_list'),
+  };
+
+  // ── Channel Setup ─────────────────────────────────────────────────────────
   const channelConfig = {
     channel_news_feed:       'news-feed',
     channel_signed_coaches:  'signed-coaches',
@@ -817,17 +907,17 @@ async function handleSetup(interaction) {
     channel_streaming:       'streaming',
   };
 
-  const needsNewsFeed  = features.feature_press_releases || features.feature_rankings;
-  const needsSigned    = features.feature_job_offers;
-  const needsTeamList  = features.feature_job_offers;
-  const needsAdvance   = features.feature_advance_system;
-  const needsStreaming = features.feature_stream_reminders || features.feature_streaming;
+  const needsNewsFeed  = features.feature_ranking || features.feature_ranking_all_time || features.feature_game_result;
+  const needsSigned    = features.feature_job_offers || features.feature_assign_team;
+  const needsTeamList  = features.feature_list_teams;
+  const needsAdvance   = features.feature_advance || features.feature_season_advance;
+  const needsStreaming = features.feature_game_results_reminder || features.feature_stream_autopost || features.feature_streaming_list;
 
   if (needsNewsFeed || needsSigned || needsTeamList || needsAdvance || needsStreaming) {
-    await dm.send('**— Channel Setup —**\nSelect the channel for each feature you enabled.');
+    await dm.send('**— Channel Setup —**\nSelect the channel for each feature group.');
 
     if (needsNewsFeed) {
-      const ch = await pickChannel('📰 **News Feed** — Where should game results and weekly summary post?', textChannels);
+      const ch = await pickChannel('📰 **News Feed** — Where should game results and standings post?', textChannels);
       if (!ch) return;
       channelConfig.channel_news_feed = ch.name;
     }
@@ -874,13 +964,10 @@ async function handleSetup(interaction) {
 
     const starMin = await askWithDefault('**[Job Offers 1/4]** Minimum star rating for job offers? (1.0 – 5.0)\nDefault: 2.5', '2.5');
     if (!starMin) return;
-
     const starMax = await askWithDefault('**[Job Offers 2/4]** Maximum star rating? Type none for no cap.\nDefault: none', 'none');
     if (!starMax) return;
-
     const offersCount = await askWithDefault('**[Job Offers 3/4]** How many offers should each user receive?\nDefault: 3', '3');
     if (!offersCount) return;
-
     const offersExpiry = await askWithDefault('**[Job Offers 4/4]** How many hours should offers last before expiring? (1–24)\nDefault: 24', '24');
     if (!offersExpiry) return;
 
@@ -892,23 +979,23 @@ async function handleSetup(interaction) {
     };
   }
 
-  // ── Stream Reminders Config ───────────────────────────────────────────────
+  // ── Game Results Reminder Config ──────────────────────────────────────────
   let streamConfig = { stream_reminder_minutes: 45 };
 
-  if (features.feature_stream_reminders) {
+  if (features.feature_game_results_reminder) {
     const mins = await askWithDefault(
-      '**— Stream Reminders Setup —**\nHow many minutes after a stream link is posted should the bot send a reminder?\nDefault: 45', '45'
+      '**— Game Results Reminder Setup —**\nHow many minutes after a game result is submitted should the bot send a reminder?\nDefault: 45', '45'
     );
     if (!mins) return;
     streamConfig = { stream_reminder_minutes: parseInt(mins) || 45 };
   }
 
-  // ── Advance System Config ─────────────────────────────────────────────────
+  // ── Advance Management Config ─────────────────────────────────────────────
   let advanceConfig = { advance_intervals: '[24, 48]' };
 
-  if (features.feature_advance_system) {
+  if (features.feature_advance) {
     const intervals = await askWithDefault(
-      '**— Advance System Setup —**\nWhat advance intervals (hours) should be available? Enter as a JSON array.\nExample: [24, 48] or [12, 24, 48]\nDefault: [24, 48]', '[24, 48]'
+      '**— Advance Management Setup —**\nWhat advance intervals (hours) should be available? Enter as a JSON array.\nExample: [24, 48] or [12, 24, 48]\nDefault: [24, 48]', '[24, 48]'
     );
     if (!intervals) return;
     advanceConfig = { advance_intervals: intervals };
@@ -927,40 +1014,63 @@ async function handleSetup(interaction) {
       ...jobOffersConfig,
       ...streamConfig,
       ...advanceConfig,
+      setup_complete:      true,
     });
 
-    // ── Summary Embed ─────────────────────────────────────────────────────
+    // ── Summary Embed — group-based display ───────────────────────────────
+    const fv = (flag) => features[flag] ? '✅' : '❌';
     const summaryFields = [
-      { name: 'League Name',      value: leagueName,  inline: true },
-      { name: 'Abbreviation',     value: leagueAbbr,  inline: true },
-      { name: '\u200b',           value: '\u200b',     inline: true },
-      { name: 'Job Offers',       value: features.feature_job_offers       ? '✅' : '❌', inline: true },
-      { name: 'Stream Reminders', value: features.feature_stream_reminders ? '✅' : '❌', inline: true },
-      { name: 'Streaming',         value: features.feature_streaming         ? '✅' : '❌', inline: true },
-      { name: 'Advance System',   value: features.feature_advance_system   ? '✅' : '❌', inline: true },
-      { name: 'Press Releases',   value: features.feature_press_releases   ? '✅' : '❌', inline: true },
-      { name: 'Rankings',         value: features.feature_rankings         ? '✅' : '❌', inline: true },
-      { name: '\u200b',           value: '\u200b',     inline: true },
+      { name: 'League Name',  value: leagueName, inline: true },
+      { name: 'Abbreviation', value: leagueAbbr, inline: true },
+      { name: '\u200b',       value: '\u200b',   inline: true },
+      {
+        name: '🏈 Game Day',
+        value:
+          `${fv('feature_game_result')} Game Result  ${fv('feature_any_game_result')} Any Game Result\n` +
+          `${fv('feature_ranking')} Ranking  ${fv('feature_ranking_all_time')} All-Time Ranking\n` +
+          `${fv('feature_game_results_reminder')} Game Results Reminder`,
+        inline: false,
+      },
+      {
+        name: '👥 Team Selection',
+        value:
+          `${fv('feature_job_offers')} Job Offers  ${fv('feature_assign_team')} Assign Team\n` +
+          `${fv('feature_reset_team')} Reset Team  ${fv('feature_list_teams')} List Teams\n` +
+          `${fv('feature_move_coach')} Move Coach`,
+        inline: false,
+      },
+      {
+        name: '📅 Advance Management',
+        value: `${fv('feature_advance')} Advance  ${fv('feature_season_advance')} Season Advance`,
+        inline: false,
+      },
+      {
+        name: '📡 Autopost Streams',
+        value: `${fv('feature_stream_autopost')} Streamer Register  ${fv('feature_streaming_list')} Streamer List`,
+        inline: false,
+      },
+      { name: '\u200b', value: '\u200b', inline: false },
     ];
 
     if (needsNewsFeed)  summaryFields.push({ name: 'News Feed',       value: '#' + channelConfig.channel_news_feed,       inline: true });
     if (needsSigned)    summaryFields.push({ name: 'Signed Coaches',  value: '#' + channelConfig.channel_signed_coaches,  inline: true });
     if (needsTeamList)  summaryFields.push({ name: 'Team Lists',      value: '#' + channelConfig.channel_team_lists,      inline: true });
     if (needsAdvance)   summaryFields.push({ name: 'Advance Tracker', value: '#' + channelConfig.channel_advance_tracker, inline: true });
-    if (needsStreaming) summaryFields.push({ name: 'Streaming',        value: '#' + channelConfig.channel_streaming,       inline: true });
+    if (needsStreaming) summaryFields.push({ name: 'Streaming',       value: '#' + channelConfig.channel_streaming,       inline: true });
     summaryFields.push({ name: 'Head Coach Role', value: '@' + headCoachRoleName, inline: true });
     summaryFields.push({ name: '\u200b', value: '\u200b', inline: true });
 
     if (features.feature_job_offers) {
       summaryFields.push(
-        { name: 'Min Star Rating', value: jobOffersConfig.star_rating_for_offers + ' stars',                                              inline: true },
+        { name: 'Min Star Rating', value: jobOffersConfig.star_rating_for_offers + ' stars',                                                             inline: true },
         { name: 'Max Star Rating', value: jobOffersConfig.star_rating_max_for_offers ? jobOffersConfig.star_rating_max_for_offers + ' stars' : 'No cap', inline: true },
-        { name: 'Offers Per User', value: String(jobOffersConfig.job_offers_count),                                                       inline: true },
-        { name: 'Offer Expiry',    value: jobOffersConfig.job_offers_expiry_hours + ' hrs',                                               inline: true },
+        { name: 'Offers Per User', value: String(jobOffersConfig.job_offers_count),                                                                      inline: true },
+        { name: 'Offer Expiry',    value: jobOffersConfig.job_offers_expiry_hours + ' hrs',                                                              inline: true },
       );
     }
-    if (features.feature_stream_reminders) summaryFields.push({ name: 'Stream Reminder',  value: streamConfig.stream_reminder_minutes + ' min',  inline: true });
-    if (features.feature_advance_system)   summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals,                 inline: true });
+    if (features.feature_game_results_reminder) summaryFields.push({ name: 'Results Reminder',  value: streamConfig.stream_reminder_minutes + ' min', inline: true });
+    if (features.feature_advance)               summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals,               inline: true });
+    if (features.feature_advance)               summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals,               inline: true });
 
     const embed = new EmbedBuilder()
       .setTitle('✅ Setup Complete!')
@@ -975,34 +1085,44 @@ async function handleSetup(interaction) {
   }
 }
 
-// /streaming ─────────────────────────────────────────
+// /streamer ──────────────────────────────────────────
 async function handleStreaming(interaction) {
   await interaction.deferReply({ flags: 64 });
   const config = await getConfig(interaction.guildId);
+  const sub    = interaction.options.getSubcommand();
 
-  if (!config.feature_streaming) {
-    return interaction.editReply({ content: '❌ **Streaming Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
+  if (!config.setup_complete) return replySetupRequired(interaction);
+  const featureEnabled = sub === 'register' ? config.feature_stream_autopost : config.feature_streaming_list;
+  if (!featureEnabled) {
+    return interaction.editReply({ content: `❌ **${sub === 'register' ? 'Streamer Registration' : 'Streamer List'} Disabled**\nThis feature is turned off. An admin can enable it with \`/config features\`.` });
   }
 
-  const sub = interaction.options.getSubcommand();
+  if (sub === 'register') {
+    const platform = interaction.options.getString('platform', true);
+    const handle   = interaction.options.getString('handle', true).trim().replace(/^@/, '');
 
-  if (sub === 'set') {
-    const url = interaction.options.getString('url', true).trim();
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      return interaction.editReply('❌ **Invalid URL**\nPlease provide a full URL starting with `http://` or `https://`.');
+    if (!handle) {
+      return interaction.editReply('❌ **Invalid Handle**\nPlease enter your username without spaces (e.g. `johndoe`).');
     }
+
     try {
-      await setCoachStream(interaction.guildId, interaction.user.id, url);
-      await interaction.editReply(`✅ **Stream link saved!**\n${url}\n\nAdmins can run \`/streaming list\` to see all coaches and their URLs.`);
+      // Store platform + handle. stream_url column reused to store the handle,
+      // platform column stores 'twitch' or 'youtube'.
+      await setCoachStream(interaction.guildId, interaction.user.id, handle, platform);
+      const platformLabel = platform === 'twitch' ? 'Twitch' : 'YouTube';
+      await interaction.editReply(
+        `✅ **Streamer Registered!**\n` +
+        `Platform: **${platformLabel}**\nHandle: **${handle}**\n\n` +
+        `Admins can run \`/streamer list\` to see all registered coaches.`
+      );
     } catch (err) {
-      console.error('[streaming set] Error:', err);
-      await interaction.editReply(`❌ **Failed to save stream link**\nDatabase error: ${err.message}`);
+      console.error('[streamer register] Error:', err);
+      await interaction.editReply(`❌ **Failed to save handle**\nDatabase error: ${err.message}`);
     }
     return;
   }
 
   if (sub === 'list') {
-    // list is available to everyone but most useful to admins
     let streamers;
     try {
       streamers = await getAllStreamers(interaction.guildId);
@@ -1011,24 +1131,30 @@ async function handleStreaming(interaction) {
     }
 
     if (streamers.length === 0) {
-      return interaction.editReply('No coaches have set a streaming link yet.');
+      return interaction.editReply('No coaches have registered a stream handle yet.');
     }
 
-    // Use cached members only — no serial API calls
+    // Build rows: Discord display name + platform + handle
     const rows = streamers.map(entry => {
-      const member = interaction.guild.members.cache.get(entry.user_id);
-      const name   = member?.displayName ?? `Unknown (${entry.user_id})`;
-      return { name, url: entry.stream_url };
+      const member   = interaction.guild.members.cache.get(entry.user_id);
+      const discName = member?.displayName ?? `Unknown (${entry.user_id})`;
+      const platform = entry.platform === 'youtube' ? 'YouTube' : 'Twitch';
+      return { discName, platform, handle: entry.stream_url };
     });
 
-    // Align columns: pad coach names to the longest name width
-    const maxLen     = Math.max(...rows.map(r => r.name.length));
-    const tableLines = rows.map(r => `${r.name.padEnd(maxLen)}  ${r.url}`);
-    const header     = `${'Coach'.padEnd(maxLen)}  URL`;
-    const divider    = `${'-'.repeat(maxLen)}  ${'-'.repeat(40)}`;
-    const table      = [header, divider, ...tableLines].join('\n');
+    // Pad columns for alignment
+    const nameLen     = Math.max('Coach'.length,    ...rows.map(r => r.discName.length));
+    const platformLen = Math.max('Platform'.length, ...rows.map(r => r.platform.length));
+    const handleLen   = Math.max('Handle'.length,   ...rows.map(r => r.handle.length));
 
-    // Discord has a 2000 char limit — split into chunks if needed
+    const pad = (str, len) => str.padEnd(len);
+    const header  = `${pad('Coach', nameLen)}  ${pad('Platform', platformLen)}  Handle`;
+    const divider = `${'-'.repeat(nameLen)}  ${'-'.repeat(platformLen)}  ${'-'.repeat(handleLen)}`;
+    const tableLines = rows.map(r =>
+      `${pad(r.discName, nameLen)}  ${pad(r.platform, platformLen)}  ${r.handle}`
+    );
+    const table = [header, divider, ...tableLines].join('\n');
+
     const block = '```\n' + table + '\n```';
     if (block.length <= 2000) {
       await interaction.editReply({ content: `**Streamers (${rows.length})**\n${block}` });
@@ -1061,13 +1187,12 @@ async function handleConfigView(interaction) {
       { name: '🆔 Guild ID',     value: config.guild_id,                         inline: true },
       { name: '\u200b',          value: '\u200b',                                 inline: true },
       { name: '🔧 Features', value:
-        `Job Offers: ${config.feature_job_offers ? '✅' : '❌'}\n` +
-        `Stream Reminders: ${config.feature_stream_reminders ? '✅' : '❌'}\n` +
-        `Streaming:        ${config.feature_streaming         ? '✅' : '❌'}\n` +
-        `Advance System: ${config.feature_advance_system ? '✅' : '❌'}\n` +
-        `Press Releases: ${config.feature_press_releases ? '✅' : '❌'}\n` +
-        `Rankings: ${config.feature_rankings ? '✅' : '❌'}`,
-        inline: true },
+        `🏈 ${config.feature_game_result ? '✅' : '❌'} Game Result  ${config.feature_any_game_result ? '✅' : '❌'} Any Game Result\n` +
+        `${config.feature_ranking ? '✅' : '❌'} Ranking  ${config.feature_ranking_all_time ? '✅' : '❌'} All-Time  ${config.feature_game_results_reminder ? '✅' : '❌'} Reminder\n` +
+        `👥 ${config.feature_job_offers ? '✅' : '❌'} Job Offers  ${config.feature_assign_team ? '✅' : '❌'} Assign  ${config.feature_reset_team ? '✅' : '❌'} Reset  ${config.feature_list_teams ? '✅' : '❌'} List  ${config.feature_move_coach ? '✅' : '❌'} Move\n` +
+        `📅 ${config.feature_advance ? '✅' : '❌'} Advance  ${config.feature_season_advance ? '✅' : '❌'} Season Advance\n` +
+        `📡 ${config.feature_stream_autopost ? '✅' : '❌'} Streamer Register  ${config.feature_streaming_list ? '✅' : '❌'} Streamer List`,
+        inline: false },
       { name: '📺 Channels', value:
         `News Feed: \`${config.channel_news_feed}\`\n` +
         `Advance Tracker: \`${config.channel_advance_tracker}\`\n` +
@@ -1080,7 +1205,7 @@ async function handleConfigView(interaction) {
         `Max Star Rating: \`${config.star_rating_max_for_offers || 'No cap'}\`\n` +
         `Job Offers Count: \`${config.job_offers_count}\`\n` +
         `Offers Expire: \`${config.job_offers_expiry_hours}hrs\`\n` +
-        `Stream Reminder: \`${config.stream_reminder_minutes} min\`\n` +
+        `Results Reminder: \`${config.stream_reminder_minutes} min\`\n` +
         `Advance Intervals: \`${config.advance_intervals}\``,
         inline: true },
     );
@@ -1088,27 +1213,194 @@ async function handleConfigView(interaction) {
 }
 
 // /config features ────────────────────────────────────
+// Feature groups definition (shared by /config features handler + select menu handler)
+const FEATURE_GROUPS = [
+  {
+    key:   'game_day',
+    label: '🏈 Game Day',
+    commands: [
+      { id: 'feature_game_result',           label: 'Game Result',           desc: 'Coaches submit their own game results' },
+      { id: 'feature_any_game_result',        label: 'Any Game Result',       desc: 'Admin enters results for any two teams' },
+      { id: 'feature_ranking',               label: 'Ranking',               desc: 'Season standings' },
+      { id: 'feature_ranking_all_time',      label: 'All-Time Ranking',      desc: 'All-time win/loss records' },
+      { id: 'feature_game_results_reminder', label: 'Results Reminder',      desc: 'Reminder to submit result after streaming' },
+    ],
+  },
+  {
+    key:   'team_selection',
+    label: '👥 Team Selection',
+    commands: [
+      { id: 'feature_job_offers',   label: 'Job Offers',  desc: 'Coaches request job offers via DM' },
+      { id: 'feature_assign_team',  label: 'Assign Team', desc: 'Admin manually assigns a team' },
+      { id: 'feature_reset_team',   label: 'Reset Team',  desc: 'Admin removes a coach from their team' },
+      { id: 'feature_list_teams',   label: 'List Teams',  desc: 'Post team availability list' },
+      { id: 'feature_move_coach',   label: 'Move Coach',  desc: 'Admin moves a coach to a different team' },
+    ],
+  },
+  {
+    key:   'advance',
+    label: '📅 Advance Management',
+    commands: [
+      { id: 'feature_advance',        label: 'Advance',        desc: 'Advance to next week/phase' },
+      { id: 'feature_season_advance', label: 'Season Advance', desc: 'Advance to next season' },
+    ],
+  },
+  {
+    key:   'autopost_streams',
+    label: '📡 Autopost Streams',
+    commands: [
+      { id: 'feature_stream_autopost',  label: 'Streamer Register', desc: 'Store handle for use with Wamellow' },
+      { id: 'feature_streaming_list',   label: 'Streamer List',   desc: '/streamer list for Wamellow' },
+    ],
+  },
+];
+
 async function handleConfigFeatures(interaction) {
   await interaction.deferReply({ flags: 64 });
-  const config = await getConfig(interaction.guildId);
-  const row = new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId(`features-toggle-${interaction.guildId}`)
-      .setPlaceholder('Select features to toggle...')
-      .setMinValues(0)
-      .setMaxValues(6)
-      .addOptions([
-        { label: 'Job Offers',       value: 'feature_job_offers',       description: 'Job offer system for coaches',             default: !!config.feature_job_offers },
-        { label: 'Stream Reminders', value: 'feature_stream_reminders', description: 'Auto-reminder when stream link is posted', default: !!config.feature_stream_reminders },
-        { label: 'Streaming',        value: 'feature_streaming',        description: '/streaming set & list for Wamellow',       default: !!config.feature_streaming },
-        { label: 'Advance System',   value: 'feature_advance_system',   description: 'Phase advance system',                     default: !!config.feature_advance_system },
-        { label: 'Press Releases',   value: 'feature_press_releases',   description: 'Coach press release announcements',        default: !!config.feature_press_releases },
-        { label: 'Rankings',         value: 'feature_rankings',         description: 'Season standings and all-time rankings',   default: !!config.feature_rankings },
-      ])
-  );
-  await interaction.editReply({
-    content: '**Feature Toggles** — Select the features you want **ENABLED** (deselect to disable):',
-    components: [row],
+  const config  = await getConfig(interaction.guildId);
+  const guildId = interaction.guildId;
+
+  // Build one row of buttons per group showing current on/off state
+  const buildGroupRows = (currentConfig) => {
+    const rows = [];
+    for (const group of FEATURE_GROUPS) {
+      const allOn  = group.commands.every(c => !!currentConfig[c.id]);
+      const allOff = group.commands.every(c => !currentConfig[c.id]);
+      const status = allOn ? '✅' : allOff ? '❌' : '🔧';
+      rows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`cfg_grp_${guildId}_${group.key}`)
+          .setLabel(`${status} ${group.label}`)
+          .setStyle(allOn ? ButtonStyle.Success : allOff ? ButtonStyle.Danger : ButtonStyle.Secondary),
+      ));
+    }
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`cfg_grp_${guildId}_done`)
+        .setLabel('✔ Done')
+        .setStyle(ButtonStyle.Primary),
+    ));
+    return rows;
+  };
+
+  const msg = await interaction.editReply({
+    content: '**⚙️ Feature Groups**\nClick a group to toggle all commands in it, or customize individual commands.\n✅ = all on · ❌ = all off · 🔧 = mixed',
+    components: buildGroupRows(config),
+  });
+
+  // Collector listens for group button clicks
+  const collector = msg.createMessageComponentCollector({
+    filter: i => i.user.id === interaction.user.id,
+    time:   120000,
+  });
+
+  let currentConfig = { ...config };
+
+  collector.on('collect', async (btnInt) => {
+    const id = btnInt.customId.replace(`cfg_grp_${guildId}_`, '');
+
+    if (id === 'done') {
+      collector.stop('done');
+      await btnInt.update({ content: '✅ **Features saved!**', components: [] });
+      return;
+    }
+
+    const group = FEATURE_GROUPS.find(g => g.key === id);
+    if (!group) return;
+
+    // Show customize UI for this group
+    const allOn = group.commands.every(c => !!currentConfig[c.id]);
+
+    const buildCmdRows = () => {
+      const rows = [];
+      for (let i = 0; i < group.commands.length; i += 4) {
+        rows.push(new ActionRowBuilder().addComponents(
+          group.commands.slice(i, i + 4).map(cmd =>
+            new ButtonBuilder()
+              .setCustomId(`cfg_cmd_${guildId}_${cmd.id}`)
+              .setLabel((currentConfig[cmd.id] ? '✅ ' : '❌ ') + cmd.label)
+              .setStyle(currentConfig[cmd.id] ? ButtonStyle.Success : ButtonStyle.Secondary)
+          )
+        ));
+      }
+      rows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`cfg_cmd_${guildId}_ALL_ON`)
+          .setLabel('Enable All')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`cfg_cmd_${guildId}_ALL_OFF`)
+          .setLabel('Disable All')
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(`cfg_cmd_${guildId}_BACK`)
+          .setLabel('← Back')
+          .setStyle(ButtonStyle.Primary),
+      ));
+      return rows;
+    };
+
+    const cmdLines = group.commands.map(c => `${currentConfig[c.id] ? '✅' : '❌'} **${c.label}** — ${c.desc}`).join('\n');
+    await btnInt.update({
+      content: `**${group.label}**\n${cmdLines}`,
+      components: buildCmdRows(),
+    });
+
+    // Inner collector for this group's command toggles
+    const innerCollector = msg.createMessageComponentCollector({
+      filter: i => i.user.id === interaction.user.id,
+      time:   120000,
+    });
+
+    innerCollector.on('collect', async (inner) => {
+      const innerId = inner.customId.replace(`cfg_cmd_${guildId}_`, '');
+
+      if (innerId === 'BACK') {
+        innerCollector.stop('back');
+        // Save changes then return to group view
+        const updates = Object.fromEntries(group.commands.map(c => [c.id, !!currentConfig[c.id]]));
+        await saveConfig(guildId, updates);
+        await inner.update({
+          content: '**⚙️ Feature Groups**\nClick a group to toggle all commands in it, or customize individual commands.\n✅ = all on · ❌ = all off · 🔧 = mixed',
+          components: buildGroupRows(currentConfig),
+        });
+        return;
+      }
+
+      if (innerId === 'ALL_ON') {
+        group.commands.forEach(c => { currentConfig[c.id] = true; });
+      } else if (innerId === 'ALL_OFF') {
+        group.commands.forEach(c => { currentConfig[c.id] = false; });
+      } else {
+        // Toggle individual command
+        const cmd = group.commands.find(c => c.id === innerId);
+        if (cmd) currentConfig[cmd.id] = !currentConfig[cmd.id];
+      }
+
+      const updatedLines = group.commands.map(c => `${currentConfig[c.id] ? '✅' : '❌'} **${c.label}** — ${c.desc}`).join('\n');
+      await inner.update({
+        content: `**${group.label}**\n${updatedLines}`,
+        components: buildCmdRows(),
+      });
+    });
+
+    innerCollector.on('end', (_, reason) => {
+      if (reason !== 'back') {
+        // Save on timeout too
+        const updates = Object.fromEntries(group.commands.map(c => [c.id, !!currentConfig[c.id]]));
+        saveConfig(guildId, updates).catch(console.error);
+      }
+    });
+  });
+
+  collector.on('end', async (_, reason) => {
+    if (reason !== 'done') {
+      // Save everything on timeout and clean up buttons
+      const allFlags = FEATURE_GROUPS.flatMap(g => g.commands.map(c => c.id));
+      const updates  = Object.fromEntries(allFlags.map(f => [f, !!currentConfig[f]]));
+      await saveConfig(guildId, updates).catch(console.error);
+      await interaction.editReply({ components: [] }).catch(() => {});
+    }
   });
 }
 
@@ -1150,7 +1442,8 @@ async function handleJobOffers(interaction) {
   await interaction.deferReply({ flags: 64 });
   const config  = await getConfig(guildId);
 
-  if (!config.feature_job_offers) {
+  if (!config.setup_complete) return replySetupRequired(interaction);
+  if (!config.feature_job_offers || !config.feature_assign_team) {
     return interaction.editReply({ content: '❌ **Job Offers Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
   }
 
@@ -1369,12 +1662,19 @@ async function expireJobOffers() {
         if (newsChannel) newsChannel.send({ content: `<@${user_id}>`, embeds: [embed] });
       });
     } catch (err) {
-      console.error('[expireJobOffers] Error:', err.message);
+      // Log per-user errors but always continue — delete still runs below
+      console.error(`[expireJobOffers] Error notifying ${user_id}:`, err.message);
     }
   }
 
-  await supabase.from('job_offers').delete().lt('expires_at', now);
-  console.log(`[expireJobOffers] Removed ${expired.length} expired offer(s).`);
+  // Always delete expired rows regardless of notification errors above
+  try {
+    const { error } = await supabase.from('job_offers').delete().lt('expires_at', now);
+    if (error) console.error('[expireJobOffers] Delete error:', error.message);
+    else console.log(`[expireJobOffers] Removed ${expired.length} expired offer(s).`);
+  } catch (err) {
+    console.error('[expireJobOffers] Failed to delete expired offers:', err.message);
+  }
 }
 
 // /game-result ────────────────────────────────────────
@@ -1382,6 +1682,8 @@ async function handleGameResult(interaction) {
   await interaction.deferReply();
   const guildId      = interaction.guildId;
   const config       = await getConfig(guildId);
+  if (!config.setup_complete) return replySetupRequired(interaction);
+  if (!config.feature_game_result) return interaction.editReply({ content: '❌ Game results are disabled on this server.' });
   const meta         = await getMeta(guildId);
   const opponentName = interaction.options.getString('opponent');
   const yourScore    = interaction.options.getInteger('your-score');
@@ -1453,13 +1755,14 @@ async function handleGameResult(interaction) {
   if (newsChannel && newsChannel.id !== interaction.channelId) {
     await newsChannel.send({ embeds: [embed] });
   }
-}
-// Inside handleGameResult, right after successful insert into 'results'
-for (const [key, timer] of streamReminderTimers.entries()) {
-  if (key.startsWith(`${guildId}-`) && key.endsWith(`-${userId}`)) {
-    clearTimeout(timer);
-    streamReminderTimers.delete(key);
-    console.log(`[stream] Cancelled reminder for ${userId} after submitting result`);
+
+  // Cancel any pending stream reminder for this user now that they've submitted
+  for (const [key, timer] of streamReminderTimers.entries()) {
+    if (key.startsWith(`${guildId}-`) && key.endsWith(`-${userId}`)) {
+      clearTimeout(timer);
+      streamReminderTimers.delete(key);
+      console.log(`[stream] Cancelled reminder for ${userId} after submitting result`);
+    }
   }
 }
 
@@ -1468,6 +1771,7 @@ async function handleAnyGameResult(interaction) {
   await interaction.deferReply();
   const guildId   = interaction.guildId;
   const config    = await getConfig(guildId);
+  if (!config.feature_any_game_result) return interaction.editReply({ content: '❌ Any-game-result is disabled on this server.' });
   const meta      = await getMeta(guildId);
   const team1Name = interaction.options.getString('team1');
   const team2Name = interaction.options.getString('team2');
@@ -1530,42 +1834,12 @@ async function handleAnyGameResult(interaction) {
   }
 }
 
-// /press-release ──────────────────────────────────────
-async function handlePressRelease(interaction) {
-  await interaction.deferReply({ flags: 64 });
-  const config = await getConfig(interaction.guildId);
-  if (!config.feature_press_releases) {
-    return interaction.editReply({ content: '❌ **Press Releases Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
-  }
-
-  const message  = interaction.options.getString('message');
-  const userTeam = await getTeamByUser(interaction.user.id, interaction.guildId);
-  const teamName = userTeam ? userTeam.team_name : interaction.user.displayName;
-
-  const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
-  if (!newsChannel) {
-    return interaction.editReply({ content: `❌ **News Feed Channel Not Found**\nThe configured channel \`#${config.channel_news_feed}\` doesn't exist in this server.\n\nAn admin can fix this with \`/config edit\` → **News Feed Channel**, or run \`/checkpermissions\` to audit all channels.` });
-  }
-
-  const embed = new EmbedBuilder()
-    .setTitle(`📰 Press Release — ${teamName}`)
-    .setColor(config.embed_color_primary_int)
-    .setDescription(message)
-    .setFooter({ text: `Posted by ${interaction.user.displayName}` })
-    .setTimestamp();
-
-  await newsChannel.send({ embeds: [embed] });
-  await supabase.from('news_feed').insert({
-    guild_id: interaction.guildId, author_id: interaction.user.id, team_name: teamName, message,
-  });
-  await interaction.editReply({ content: '✅ Press release posted!' });
-}
-
 // /ranking ────────────────────────────────────────────
 async function handleRanking(interaction) {
   await interaction.deferReply({ flags: 64 });
   const config = await getConfig(interaction.guildId);
-  if (!config.feature_rankings) {
+  if (!config.setup_complete) return replySetupRequired(interaction);
+  if (!config.feature_ranking) {
     return interaction.editReply({ content: '❌ **Rankings Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
   }
 
@@ -1604,6 +1878,8 @@ async function handleRanking(interaction) {
 async function handleRankingAllTime(interaction) {
   await interaction.deferReply({ flags: 64 });
   const config = await getConfig(interaction.guildId);
+  if (!config.setup_complete) return replySetupRequired(interaction);
+  if (!config.feature_ranking_all_time) return interaction.editReply({ content: '❌ All-time rankings are disabled on this server.' });
 
   const { data: records } = await supabase
     .from('records')
@@ -1649,6 +1925,7 @@ async function handleRankingAllTime(interaction) {
 async function handleAssignTeam(interaction) {
   const guildId  = interaction.guildId;
   const config   = await getConfig(guildId);
+  if (!config.feature_assign_team) return interaction.reply({ content: '❌ Team assignment is disabled on this server.', flags: 64 });
   const guild    = interaction.guild;
   const user     = interaction.options.getUser('user');
   const teamName = interaction.options.getString('team');
@@ -1706,6 +1983,7 @@ async function handleResetTeam(interaction) {
   await interaction.deferReply();
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
+  if (!config.feature_reset_team) return interaction.editReply({ content: '❌ Team reset is disabled on this server.' });
   const user    = interaction.options.getUser('user');
 
   const team = await getTeamByUser(user.id, guildId);
@@ -1755,6 +2033,7 @@ async function handleListTeams(interaction) {
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
   await interaction.deferReply({ flags: 64 });
+  if (!config.feature_list_teams) return interaction.editReply({ content: '❌ Team listing is disabled on this server.' });
 
   let allTeams;
   try {
@@ -1767,7 +2046,7 @@ async function handleListTeams(interaction) {
   const maxRating = config.star_rating_max_for_offers || 999;
 
   // Always show taken teams; only show available teams within the configured range
-  const teams = allTeams.filter(t => t.user_id || (parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating));
+  const teams = allTeams.filter(t => t.user_id || (t.star_rating != null && parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating));
 
   // Group by conference
   const confMap = {};
@@ -1894,8 +2173,8 @@ async function handleAdvance(interaction) {
   guildConfigs.delete(guildId);
   const config = await loadGuildConfig(guildId);
 
-  if (!config.feature_advance_system) {
-    return interaction.editReply({ content: '❌ **Advance System Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
+  if (!config.feature_advance) {
+    return interaction.editReply({ content: '❌ **Advance Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
   }
 
   const hoursStr = interaction.options.getString('hours');
@@ -1988,6 +2267,7 @@ async function handleSeasonAdvance(interaction) {
   await interaction.deferReply({ flags: 64 });
   const guildId = interaction.guildId;
   const config = await getConfig(guildId);
+  if (!config.feature_season_advance) return interaction.editReply({ content: '❌ Season advance is disabled on this server.' });
   const meta = await getMeta(guildId);
 
   const newSeason = meta.season + 1;
@@ -2030,6 +2310,7 @@ async function handleSeasonAdvance(interaction) {
 async function handleMoveCoach(interaction) {
   const guildId     = interaction.guildId;
   const config      = await getConfig(guildId);
+  if (!config.feature_move_coach) return interaction.reply({ content: '❌ Move coach is disabled on this server.', flags: 64 });
   const coachId     = interaction.options.getString('coach');
   const newTeamName = interaction.options.getString('new-team');
 
@@ -2070,6 +2351,213 @@ async function handleMoveCoach(interaction) {
   const announceTarget = signedChannel || newsChannel;
   if (announceTarget && announceTarget.id !== interaction.channelId) {
     await announceTarget.send({ embeds: [embed] });
+  }
+}
+
+// /help ──────────────────────────────────────────────
+async function handleHelp(interaction) {
+  await interaction.deferReply({ flags: 64 });
+
+  const config  = await getConfig(interaction.guildId);
+  const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!config.setup_complete && !isAdmin) return replySetupRequired(interaction);
+
+  // ── Command catalogue ─────────────────────────────────────────────────────
+  // Each entry: { flag, adminOnly, title, usage, description }
+  // flag: config key that must be true for the command to show (null = always show)
+  const COMMANDS = [
+    // ── Game Day ───────────────────────────────────────────────────────────
+    {
+      flag:      'feature_game_result',
+      adminOnly: false,
+      title:     '🏈 `/game-result`',
+      usage:     '/game-result opponent: <team> your-score: <n> opponent-score: <n>',
+      desc:      "Submit your game result. Your record updates automatically. Optionally add a short summary.",
+    },
+    {
+      flag:      'feature_any_game_result',
+      adminOnly: true,
+      title:     '🏈 `/any-game-result`',
+      usage:     '/any-game-result team1: <team> team2: <team> score1: <n> score2: <n>',
+      desc:      "Enter a result for any two teams. Use when a coach can't submit their own.",
+    },
+    {
+      flag:      'feature_ranking',
+      adminOnly: false,
+      title:     '🏆 `/ranking`',
+      usage:     '/ranking',
+      desc:      "View the current season standings sorted by wins.",
+    },
+    {
+      flag:      'feature_ranking_all_time',
+      adminOnly: false,
+      title:     '🏆 `/ranking-all-time`',
+      usage:     '/ranking-all-time',
+      desc:      "View all-time win/loss records across every season.",
+    },
+    {
+      flag:      'feature_game_results_reminder',
+      adminOnly: false,
+      title:     '🔔 Game Results Reminder',
+      usage:     '(automatic)',
+      desc:      `After a stream link is posted in the streaming channel, the bot sends a reminder to submit your result after ${config.stream_reminder_minutes || 45} minutes.`,
+    },
+    // ── Team Selection ─────────────────────────────────────────────────────
+    {
+      flag:      'feature_job_offers',
+      adminOnly: false,
+      title:     '📋 `/joboffers`',
+      usage:     '/joboffers',
+      desc:      "Request a set of coaching job offers. You'll receive up to " + (config.job_offers_count || 3) + " teams via DM based on star rating. Offers expire after " + (config.job_offers_expiry_hours || 48) + " hours.",
+    },
+    {
+      flag:      'feature_assign_team',
+      adminOnly: true,
+      title:     '➕ `/assign-team`',
+      usage:     '/assign-team user: @user team: <team>',
+      desc:      "Manually assign a team to a user and post a signing announcement. Use skip-announcement: true to assign quietly.",
+    },
+    {
+      flag:      'feature_reset_team',
+      adminOnly: true,
+      title:     '❌ `/resetteam`',
+      usage:     '/resetteam user: @user',
+      desc:      "Remove a coach from their team, strip their Head Coach role, and clear their stream handle.",
+    },
+    {
+      flag:      'feature_list_teams',
+      adminOnly: true,
+      title:     '📋 `/listteams`',
+      usage:     '/listteams',
+      desc:      "Post the full team availability list to the configured channel, showing which teams are taken and which are open.",
+    },
+    {
+      flag:      'feature_move_coach',
+      adminOnly: true,
+      title:     '🔀 `/move-coach`',
+      usage:     '/move-coach coach: <name> new-team: <team>',
+      desc:      "Move an assigned coach from their current team to a different one.",
+    },
+    // ── Advance Management ─────────────────────────────────────────────────
+    {
+      flag:      'feature_advance',
+      adminOnly: true,
+      title:     '⏩ `/advance`',
+      usage:     '/advance hours: <n>',
+      desc:      "Advance the league to the next phase/week and set a deadline. The bot posts the new phase and deadline to the advance tracker channel.",
+    },
+    {
+      flag:      'feature_season_advance',
+      adminOnly: true,
+      title:     '🏆 `/season-advance`',
+      usage:     '/season-advance',
+      desc:      "Manually advance to the next season, resetting to Season X, Week 1, Preseason.",
+    },
+    // ── Streaming ──────────────────────────────────────────────────────────
+    {
+      flag:      'feature_stream_autopost',
+      adminOnly: false,
+      title:     '📡 `/streamer register`',
+      usage:     '/streamer register platform: Twitch|YouTube handle: <username>',
+      desc:      "Store your Twitch or YouTube handle for use with Wamellow autopost. Use /streamer list to get the full table for Wamellow setup.",
+    },
+    {
+      flag:      'feature_streaming_list',
+      adminOnly: true,
+      title:     '📋 `/streamer list`',
+      usage:     '/streamer list',
+      desc:      "Show all coaches and their registered stream handles. Formatted as a copyable table for pasting into Wamellow.",
+    },
+    // ── Always available ───────────────────────────────────────────────────
+    {
+      flag:      null,
+      adminOnly: false,
+      title:     '❓ `/help`',
+      usage:     '/help',
+      desc:      "Show this list. Admins see all commands; coaches see only commands available to them.",
+    },
+    {
+      flag:      null,
+      adminOnly: true,
+      title:     '⚙️ `/config view`',
+      usage:     '/config view',
+      desc:      "View all current bot settings for this server.",
+    },
+    {
+      flag:      null,
+      adminOnly: true,
+      title:     '⚙️ `/config edit`',
+      usage:     '/config edit setting: <name> value: <value>',
+      desc:      "Change a specific config value (channel names, star ratings, colors, etc.).",
+    },
+    {
+      flag:      null,
+      adminOnly: true,
+      title:     '⚙️ `/config features`',
+      usage:     '/config features',
+      desc:      "Toggle individual features on or off for this server.",
+    },
+    {
+      flag:      null,
+      adminOnly: true,
+      title:     '⚙️ `/config reload`',
+      usage:     '/config reload',
+      desc:      "Force-reload the bot config from the database. Use after editing Supabase directly.",
+    },
+    {
+      flag:      null,
+      adminOnly: true,
+      title:     '🔧 `/setup`',
+      usage:     '/setup',
+      desc:      "Run the interactive setup wizard. Walks through league name, features, channels, roles, and settings via DM.",
+    },
+    {
+      flag:      null,
+      adminOnly: true,
+      title:     '🔧 `/checkpermissions`',
+      usage:     '/checkpermissions',
+      desc:      "Audit the bot's permissions across all configured channels and confirm everything is set up correctly.",
+    },
+  ];
+
+  // ── Filter by feature flag + role ─────────────────────────────────────────
+  const visible = COMMANDS.filter(cmd => {
+    if (cmd.adminOnly && !isAdmin) return false;
+    if (cmd.flag && !config[cmd.flag]) return false;
+    return true;
+  });
+
+  // ── Build embed fields (max 25 Discord fields) ────────────────────────────
+  const fields = visible.map(cmd => ({
+    name:   cmd.title,
+    value:  `${cmd.usage}\n${cmd.desc}`,
+    inline: false,
+  }));
+
+  // Split into pages of 10 if needed
+  const PAGE = 10;
+  const pages = [];
+  for (let i = 0; i < fields.length; i += PAGE) pages.push(fields.slice(i, i + PAGE));
+
+  const roleLabel = isAdmin ? 'Admin' : 'Coach';
+  const embed = new EmbedBuilder()
+    .setTitle(`📖 ${config.league_name} — Command Guide (${roleLabel})`)
+    .setColor(config.embed_color_primary_int || 0x1e90ff)
+    .setDescription(
+      isAdmin
+        ? `Showing all **${visible.length}** commands available on this server. Disabled features are hidden.`
+        : `Showing **${visible.length}** commands available to you. Ask an admin to enable additional features.`
+    )
+    .addFields(pages[0]);
+
+  await interaction.editReply({ embeds: [embed] });
+
+  // Send additional pages as follow-ups if list is long
+  for (let p = 1; p < pages.length; p++) {
+    const pageEmbed = new EmbedBuilder()
+      .setColor(config.embed_color_primary_int || 0x1e90ff)
+      .addFields(pages[p]);
+    await interaction.followUp({ embeds: [pageEmbed], flags: 64 });
   }
 }
 
@@ -2365,16 +2853,16 @@ async function handleAutocomplete(interaction) {
 // =====================================================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    if (interaction.isAutocomplete()) return handleAutocomplete(interaction);
+    if (interaction.isAutocomplete()) return await handleAutocomplete(interaction);
 
     if (interaction.isChatInputCommand()) {
       switch (interaction.commandName) {
         case 'setup':             return handleSetup(interaction);
+        case 'help':              return handleHelp(interaction);
         case 'checkpermissions':  return handleCheckPermissions(interaction);
         case 'joboffers':         return handleJobOffers(interaction);
         case 'game-result':       return handleGameResult(interaction);
         case 'any-game-result':   return handleAnyGameResult(interaction);
-        case 'press-release':     return handlePressRelease(interaction);
         case 'ranking':           return handleRanking(interaction);
         case 'ranking-all-time':  return handleRankingAllTime(interaction);
         case 'assign-team':       return handleAssignTeam(interaction);
@@ -2383,7 +2871,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'advance':           return handleAdvance(interaction);
         case 'season-advance':    return handleSeasonAdvance(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
-        case 'streaming':         return handleStreaming(interaction);
+        case 'streamer':          return handleStreaming(interaction);
         case 'config':
           switch (interaction.options.getSubcommand()) {
             case 'view':     return handleConfigView(interaction);
@@ -2399,28 +2887,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId.startsWith('accept-offer_')) return handleAcceptOffer(interaction);
     }
     
-    if (interaction.isButton() && interaction.customId === 'copy_stream_list') {
-  await interaction.deferUpdate();
 
-  // Discord doesn't allow direct clipboard write from bot
-  // So we give the user a code block they can easily copy
-  const message = interaction.message.content.replace(/```/g, '').trim();
-
-  await interaction.followUp({
-    content: 'Copy the text below (click the code block and press Ctrl+C / Cmd+C):\n\n```' + message + '```',
-    flags: 64 });
-    }
-    if (interaction.isStringSelectMenu()) {
-      if (interaction.customId.startsWith('features-toggle-')) {
-        const guildId  = interaction.guildId;
-        const selected = interaction.values;
-        const allFeatures = ['feature_job_offers','feature_stream_reminders','feature_streaming','feature_advance_system','feature_press_releases','feature_rankings'];
-        const updates  = Object.fromEntries(allFeatures.map(f => [f, selected.includes(f)]));
-        await saveConfig(guildId, updates);
-        const lines = allFeatures.map(f => `${updates[f] ? '✅' : '❌'} ${f.replace('feature_', '').replace(/_/g, ' ')}`);
-        await interaction.update({ content: `**Features updated:**\n${lines.join('\n')}`, components: [] });
-      }
-    }
 
   } catch (err) {
     console.error('[interaction] Error:', err);
@@ -2434,19 +2901,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // MESSAGE LISTENER — Stream Reminders
 // =====================================================
 client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot || !message.guildId) return;
+  // Allow Wamellow (a bot) through — block all other bots
+  if (!message.guildId) return;
+  const isWamellow = message.author.bot && message.author.username.toLowerCase().includes('wamellow');
+  if (message.author.bot && !isWamellow) return;
 
   const config = await getConfig(message.guildId).catch(() => null);
-  if (!config?.feature_stream_reminders) return;
+  if (!config?.feature_game_results_reminder) return;
 
   if (message.channel.name?.toLowerCase() !== config.channel_streaming?.toLowerCase()) return;
 
-  const streamRegex = /https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be|twitch\.tv)\/[^\s<>"')]+/i;
-  if (!streamRegex.test(message.content)) return;
+  // Extract a Twitch or YouTube URL from the message
+  const streamRegex = /https?:\/\/(?:www\.)?(?:twitch\.tv|youtube\.com\/(?:live\/|channel\/|@)?|youtu\.be\/)([^\s<>"'\/]+)/i;
+  const match = message.content.match(streamRegex);
+  if (!match) return;
 
+  const handle  = match[1].replace(/[?#].*$/, '').trim(); // strip query strings/fragments
   const minutes = config.stream_reminder_minutes || 45;
 
-  scheduleStreamReminder(message.channel, message.author.id, message.guildId, minutes);
+  if (isWamellow || message.author.bot) {
+    // Wamellow posted — look up the coach by handle
+    if (!handle) return;
+    const streamer = await getStreamerByHandle(message.guildId, handle).catch(() => null);
+    if (!streamer) {
+      console.warn(`[stream] Wamellow posted handle "${handle}" but no matching coach found in coach_streams`);
+      return;
+    }
+    console.log(`[stream] Wamellow post matched handle "${handle}" → user ${streamer.user_id}`);
+    scheduleStreamReminder(message.channel, streamer.user_id, message.guildId, minutes);
+  } else {
+    // Coach posted their own link — tag them directly
+    scheduleStreamReminder(message.channel, message.author.id, message.guildId, minutes);
+  }
 });
 
 // =====================================================
@@ -2470,23 +2956,44 @@ async function initGuild(guild) {
     }, { onConflict: 'guild_id' });
     console.log(`[guild] Auto-created config for: ${guild.name} (${guild.id})`);
 
-    const owner = await guild.fetchOwner().catch(() => null);
-    if (owner) {
-      const embed = new EmbedBuilder()
-        .setTitle('👋 Dynasty Bot is Ready!')
-        .setColor(0x1e90ff)
-        .setDescription(
-          `Thanks for adding Dynasty Bot to **${guild.name}**!\n\n` +
-          `A default configuration has been created. Run \`/setup\` to customize your league settings, or \`/config view\` to see the defaults.`
-        )
-        .addFields({ name: '📋 Next Steps', value:
-          '1. Run `/setup` to configure your league\n' +
-          '2. Use `/listteams` to post available teams\n' +
-          '3. Use `/assign-team` to assign coaches',
+    const setupMsg =
+      `👋 **Thanks for adding Dynasty Bot to ${guild.name}!**\n\n` +
+      `To get started, run \`/setup\` in your server and I'll walk you through the configuration via DM.\n\n` +
+      `⚙️ Setup covers:\n` +
+      `• League name & abbreviation\n` +
+      `• Feature group selection\n` +
+      `• Channel assignments\n` +
+      `• Role assignments\n` +
+      `• Feature-specific settings\n\n` +
+      `Until setup is complete, commands will not be available to members.`;
+
+    // Try DM first
+    let dmSent = false;
+    try {
+      const owner = await guild.fetchOwner();
+      await owner.send(setupMsg);
+      dmSent = true;
+      console.log(`[guild] Setup DM sent to owner of ${guild.name}`);
+    } catch {
+      console.warn(`[guild] Could not DM owner of ${guild.name} — falling back to channel`);
+    }
+
+    // Fall back to system channel, then first available text channel
+    if (!dmSent) {
+      const fallback =
+        guild.systemChannel ||
+        guild.channels.cache
+          .filter(c => c.type === ChannelType.GuildText && c.permissionsFor(guild.members.me)?.has('SendMessages'))
+          .sort((a, b) => a.position - b.position)
+          .first();
+
+      if (fallback) {
+        const owner = await guild.fetchOwner().catch(() => null);
+        const mention = owner ? `<@${owner.id}> ` : '';
+        await fallback.send(mention + setupMsg).catch(err => {
+          console.warn(`[guild] Could not post setup message in ${guild.name}:`, err.message);
         });
-      await owner.send({ embeds: [embed] }).catch(() => {
-        console.log(`[guild] Could not DM owner of ${guild.name}`);
-      });
+      }
     }
   } catch (err) {
     console.error(`[guild] Failed to init ${guild.name} (${guild.id}):`, err.message);
