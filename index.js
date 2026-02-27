@@ -645,6 +645,10 @@ function buildCommands() {
         .setMinValue(0)
       ),
 
+    new SlashCommandBuilder()
+      .setName('reload-commands')
+      .setDescription('[Admin] Force re-register all slash commands with Discord.'),
+
   ].map(cmd => cmd.toJSON());
 }
 
@@ -2786,6 +2790,18 @@ async function handleMoveCoach(interaction) {
 }
 
 
+// /reload-commands ───────────────────────────────────────────────────
+async function handleReloadCommands(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  if (!isAdminUser(interaction)) return interaction.editReply({ content: '❌ Admin only.' });
+  try {
+    await registerCommands();
+    await interaction.editReply({ content: '✅ **Commands re-registered.** New commands may take up to a minute to appear in Discord.' });
+  } catch (err) {
+    await interaction.editReply({ content: `❌ **Failed to re-register commands:** ${err.message}` });
+  }
+}
+
 // /set-phase ───────────────────────────────────────────────────────────
 async function handleSetPhase(interaction) {
   await interaction.deferReply({ flags: 64 });
@@ -3361,6 +3377,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'listteams':         return handleListTeams(interaction);
         case 'advance':           return handleAdvance(interaction);
         case 'set-phase':          return handleSetPhase(interaction);
+        case 'reload-commands':    return handleReloadCommands(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
         case 'streamer':          return handleStreaming(interaction);
         case 'config':
