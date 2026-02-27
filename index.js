@@ -173,6 +173,7 @@ const CONFIG_DEFAULTS = {
   // ── Stream / Advance ──────────────────────────
   stream_reminder_minutes:      45,
   advance_intervals:            '[24, 48]',
+  advance_timezones:             '["ET","CT","MT","PT"]',
   // ── Embed colors ──────────────────────────────
   embed_color_primary:          '0x1e90ff',
   embed_color_win:              '0x00ff00',
@@ -195,6 +196,12 @@ function parseConfig(data) {
   return {
     ...data,
     advance_intervals_parsed: intervals,
+    advance_timezones_parsed: (() => {
+      try {
+        const tzs = JSON.parse(data.advance_timezones || '["ET","CT","MT","PT"]');
+        return Array.isArray(tzs) ? tzs : ['ET','CT','MT','PT'];
+      } catch { return ['ET','CT','MT','PT']; }
+    })(),
     embed_color_primary_int:  parseInt(data.embed_color_primary, 16) || 0x1e90ff,
     embed_color_win_int:      parseInt(data.embed_color_win, 16)     || 0x00ff00,
     embed_color_loss_int:     parseInt(data.embed_color_loss, 16)    || 0xff0000,
@@ -853,22 +860,23 @@ async function handleSetup(interaction) {
       return;
     }
 
-    const phaseChoice = await askButtons(
+    const phaseGroup = await askButtons(
       '**[League 5/?]** What phase is the league currently in?',
       [
-        { id: 'preseason',    label: 'Preseason',                style: ButtonStyle.Secondary },
-        { id: 'regular',      label: 'Regular Season',           style: ButtonStyle.Primary },
-        { id: 'conf_champ',   label: 'Conference Championship',  style: ButtonStyle.Secondary },
-        { id: 'bowl',         label: 'Bowl Season',              style: ButtonStyle.Secondary },
-        { id: 'offseason',    label: 'Offseason (post-bowl)',    style: ButtonStyle.Secondary },
+        { id: 'preseason',  label: 'Preseason',               style: ButtonStyle.Secondary },
+        { id: 'regular',    label: 'Regular Season',          style: ButtonStyle.Primary },
+        { id: 'conf_champ', label: 'Conference Championship', style: ButtonStyle.Secondary },
+        { id: 'bowl',       label: 'Bowl Season',             style: ButtonStyle.Secondary },
+        { id: 'offseason',  label: 'Offseason (post-bowl)',   style: ButtonStyle.Secondary },
       ]
     );
-    if (!phaseChoice) return;
+    if (!phaseGroup) return;
 
     let currentWeek = 1;
     let currentSub  = 0;
+    let phaseKey    = phaseGroup;
 
-    if (phaseChoice === 'regular') {
+    if (phaseGroup === 'regular') {
       let validWeek = false;
       while (!validWeek) {
         const weekStr = await ask('**[League 6/?]** What week of the regular season? (0–16)\nExample: `8`');
@@ -879,25 +887,50 @@ async function handleSetup(interaction) {
           currentSub  = parsed;
           validWeek   = true;
         } else {
-          await dm.send('❌ Please enter a number between 1 and 16.');
+          await dm.send('❌ Please enter a number between 0 and 16.');
         }
       }
-    } else if (phaseChoice === 'bowl') {
+
+    } else if (phaseGroup === 'bowl') {
       const bowlChoice = await askButtons(
         '**[League 6/?]** Which bowl week?',
         [
-          { id: '0', label: 'Bowl Week 1',          style: ButtonStyle.Secondary },
-          { id: '1', label: 'Bowl Week 2',          style: ButtonStyle.Secondary },
-          { id: '2', label: 'Semifinals',           style: ButtonStyle.Secondary },
+          { id: '0', label: 'Bowl Week 1',           style: ButtonStyle.Secondary },
+          { id: '1', label: 'Bowl Week 2',           style: ButtonStyle.Secondary },
+          { id: '2', label: 'Semifinals',            style: ButtonStyle.Secondary },
           { id: '3', label: 'National Championship', style: ButtonStyle.Primary },
         ]
       );
       if (!bowlChoice) return;
       currentSub = parseInt(bowlChoice);
-    }
 
-    // Map offseason to the first offseason phase
-    const phaseKey = phaseChoice === 'offseason' ? 'players_leaving' : phaseChoice;
+    } else if (phaseGroup === 'offseason') {
+      const offChoice = await askButtons(
+        '**[League 6/?]** Which offseason phase?',
+        [
+          { id: 'players_leaving',     label: 'Players Leaving',  style: ButtonStyle.Secondary },
+          { id: 'transfer_portal',     label: 'Transfer Portal',  style: ButtonStyle.Secondary },
+          { id: 'position_changes',    label: 'Position Changes', style: ButtonStyle.Secondary },
+          { id: 'training_results',    label: 'Training Results', style: ButtonStyle.Secondary },
+        ]
+      );
+      if (!offChoice) return;
+      phaseKey = offChoice;
+
+      if (offChoice === 'transfer_portal') {
+        const transferChoice = await askButtons(
+          '**[League 7/?]** Which transfer week?',
+          [
+            { id: '1', label: 'Transfer Week 1', style: ButtonStyle.Secondary },
+            { id: '2', label: 'Transfer Week 2', style: ButtonStyle.Secondary },
+            { id: '3', label: 'Transfer Week 3', style: ButtonStyle.Secondary },
+          ]
+        );
+        if (!transferChoice) return;
+        currentSub = parseInt(transferChoice);
+      }
+    }
+    // preseason / conf_champ: phaseKey already set, sub stays 0
 
     initialMeta = {
       season:            season,
@@ -1127,6 +1160,22 @@ async function handleSetup(interaction) {
     if (!intervalChoices) return;
     const selectedIntervals = intervalChoices.length > 0 ? intervalChoices : ['24', '48'];
     advanceConfig = { advance_intervals: JSON.stringify(selectedIntervals.map(Number)) };
+
+    const tzChoices = await askMultiButtons(
+      '**— Advance Timezones —**\nWhich timezones should appear on advance deadline posts? Select all that apply.',
+      [
+        { id: 'ET',   label: '🌴 ET  (New York)'    },
+        { id: 'CT',   label: '🌵 CT  (Chicago)'     },
+        { id: 'MT',   label: '🏔️ MT  (Denver)'      },
+        { id: 'PT',   label: '🌊 PT  (Los Angeles)' },
+        { id: 'GMT',  label: '🌐 GMT (London)'      },
+        { id: 'AEST', label: '🦘 AEST (Sydney)'     },
+        { id: 'NZST', label: '🥝 NZST (Auckland)'  },
+      ]
+    );
+    if (!tzChoices) return;
+    const selectedTZ = tzChoices.length > 0 ? tzChoices : ['ET', 'CT', 'MT', 'PT'];
+    advanceConfig.advance_timezones = JSON.stringify(selectedTZ);
   }
 
   // ── Save Config ───────────────────────────────────────────────────────────
@@ -2503,8 +2552,24 @@ async function handleAdvance(interaction) {
   const phaseLabel = formatPhase(newPhase, newSub);
   const deadline   = new Date(Date.now() + hours * 60 * 60 * 1000);
 
-  const formatTZ = (date, tz) =>
-    date.toLocaleString('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+  const TZ_MAP = {
+    ET:   { label: '🌴 ET',   iana: 'America/New_York'    },
+    CT:   { label: '🌵 CT',   iana: 'America/Chicago'     },
+    MT:   { label: '🏔️ MT',   iana: 'America/Denver'      },
+    PT:   { label: '🌊 PT',   iana: 'America/Los_Angeles' },
+    GMT:  { label: '🌐 GMT',  iana: 'Europe/London'       },
+    AEST: { label: '🦘 AEST', iana: 'Australia/Sydney'    },
+    NZST: { label: '🥝 NZST', iana: 'Pacific/Auckland'    },
+  };
+
+  const formatTZ = (date, iana) =>
+    date.toLocaleString('en-US', { timeZone: iana, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+
+  const configuredTZs = config.advance_timezones_parsed || ['ET','CT','MT','PT'];
+  const deadlineLines = configuredTZs
+    .filter(k => TZ_MAP[k])
+    .map(k => `${TZ_MAP[k].label}: **${formatTZ(deadline, TZ_MAP[k].iana)}**`)
+    .join('\n');
 
   // Mention @head-coach role on public announcement if it exists, else @everyone
   const headCoachRoleName = (config.role_head_coach || 'head coach').trim();
@@ -2517,11 +2582,7 @@ async function handleAdvance(interaction) {
     .setDescription(`The league is advancing to **${phaseLabel}**!\nAll tasks must be completed within **${hours} hours**.`)
     .addFields({
       name: '🕐 Deadline',
-      value:
-        `🌴 ET: **${formatTZ(deadline, 'America/New_York')}**\n` +
-        `🌵 CT: **${formatTZ(deadline, 'America/Chicago')}**\n` +
-        `🏔️ MT: **${formatTZ(deadline, 'America/Denver')}**\n` +
-        `🌊 PT: **${formatTZ(deadline, 'America/Los_Angeles')}**`,
+      value: deadlineLines || 'No timezones configured.',
       inline: false,
     })
     .setTimestamp();
@@ -3008,6 +3069,7 @@ async function handleAutocomplete(interaction) {
       { label: 'Signed Coaches Channel',  key: 'channel_signed_coaches',     hint: 'Channel for signing announcements' },
       { label: 'Streaming Channel',       key: 'channel_streaming',          hint: 'Channel to monitor for stream links' },
       { label: 'Head Coach Role',         key: 'role_head_coach',            hint: 'Role assigned to coaches' },
+      { label: 'Advance Timezones',        key: 'advance_timezones',          hint: 'JSON array e.g. ["ET","CT","AEST"]' },
       { label: 'Min Star Rating',         key: 'star_rating_for_offers',     hint: 'Minimum star rating for job offers' },
       { label: 'Max Star Rating',         key: 'star_rating_max_for_offers', hint: 'Maximum star rating for job offers' },
       { label: 'Offers Per User',         key: 'job_offers_count',           hint: 'Number of offers per user' },
