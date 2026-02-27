@@ -59,14 +59,14 @@ const client = new Client({
 // =====================================================
 const PHASE_CYCLE = [
   { key: 'preseason',           name: 'Preseason',               subWeeks: 1,  startSub: 0, format: ()    => 'Preseason' },
-  { key: 'regular',             name: 'Regular Season',          subWeeks: 17, startSub: 0, format: (sub) => `Week ${sub}` },
+  { key: 'regular',             name: 'Regular Season',          subWeeks: 16, startSub: 0, format: (sub) => `Week ${sub}` },
   { key: 'conf_champ',          name: 'Conference Championship', subWeeks: 1,  startSub: 0, format: ()    => 'Conference Championship' },
   { key: 'bowl',                name: 'Bowl Season',             subWeeks: 4,  startSub: 0, format: (sub) => {
     const labels = ['Bowl Week 1', 'Bowl Week 2', 'Semifinals', 'National Championship'];
     return labels[sub] ?? `Bowl Week ${sub + 1}`;
   }},
   { key: 'players_leaving',     name: 'Players Leaving',         subWeeks: 1,  startSub: 0, format: ()    => 'Players Leaving' },
-  { key: 'transfer_portal',     name: 'Transfer Portal',         subWeeks: 4,  startSub: 1, format: (sub) => `Transfer Week ${sub}` },
+  { key: 'transfer_portal',     name: 'Transfer Portal',         subWeeks: 4,  startSub: 0, format: (sub) => `Transfer Week ${sub + 1}` },
   { key: 'position_changes',    name: 'Position Changes',        subWeeks: 1,  startSub: 0, format: ()    => 'Position Changes' },
   { key: 'training_results',    name: 'Training Results',        subWeeks: 1,  startSub: 0, format: ()    => 'Training Results' },
   { key: 'encourage_transfers', name: 'Encourage Transfers',     subWeeks: 1,  startSub: 0, format: ()    => 'Encourage Transfers' },
@@ -617,7 +617,34 @@ function buildCommands() {
         .setName('list')
         .setDescription('Streamer List — show all coaches, their Discord name, and handle')
       ),
-    
+
+    new SlashCommandBuilder()
+      .setName('set-phase')
+      .setDescription('[Admin] Manually set the current season, phase, and week.')
+      .addIntegerOption(o => o.setName('season').setDescription('Season number (e.g. 3)').setRequired(true).setMinValue(1))
+      .addStringOption(o => o
+        .setName('phase')
+        .setDescription('Phase to set')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Preseason',               value: 'preseason' },
+          { name: 'Regular Season',           value: 'regular' },
+          { name: 'Conference Championship',  value: 'conf_champ' },
+          { name: 'Bowl Season',              value: 'bowl' },
+          { name: 'Players Leaving',          value: 'players_leaving' },
+          { name: 'Transfer Portal',          value: 'transfer_portal' },
+          { name: 'Position Changes',         value: 'position_changes' },
+          { name: 'Training Results',         value: 'training_results' },
+          { name: 'Encourage Transfers',      value: 'encourage_transfers' },
+        )
+      )
+      .addIntegerOption(o => o
+        .setName('sub')
+        .setDescription('Sub-phase index. Regular: 0–15 (week). Bowl: 0–3. Transfer: 0–3 (displays as Week 1–4). Others: 0.')
+        .setRequired(false)
+        .setMinValue(0)
+      ),
+
   ].map(cmd => cmd.toJSON());
 }
 
@@ -892,15 +919,15 @@ async function handleSetup(interaction) {
     if (phaseGroup === 'regular') {
       let validWeek = false;
       while (!validWeek) {
-        const weekStr = await ask('**[League 6/?]** What week of the regular season? (0–16)\nExample: `8`');
+        const weekStr = await ask('**[League 6/?]** What week of the regular season? (0–15)\nExample: `8`');
         if (!weekStr) return;
         const parsed = parseInt(weekStr);
-        if (!isNaN(parsed) && parsed >= 0 && parsed <= 16) {
+        if (!isNaN(parsed) && parsed >= 0 && parsed <= 15) {
           currentWeek = parsed;
           currentSub  = parsed;
           validWeek   = true;
         } else {
-          await dm.send('❌ Please enter a number between 0 and 16.');
+          await dm.send('❌ Please enter a number between 0 and 15.');
         }
       }
 
@@ -934,9 +961,10 @@ async function handleSetup(interaction) {
         const transferChoice = await askButtons(
           '**[League 7/?]** Which transfer week?',
           [
-            { id: '1', label: 'Transfer Week 1', style: ButtonStyle.Secondary },
-            { id: '2', label: 'Transfer Week 2', style: ButtonStyle.Secondary },
-            { id: '3', label: 'Transfer Week 3', style: ButtonStyle.Secondary },
+            { id: '0', label: 'Transfer Week 1', style: ButtonStyle.Secondary },
+            { id: '1', label: 'Transfer Week 2', style: ButtonStyle.Secondary },
+            { id: '2', label: 'Transfer Week 3', style: ButtonStyle.Secondary },
+            { id: '3', label: 'Transfer Week 4', style: ButtonStyle.Secondary },
           ]
         );
         if (!transferChoice) return;
@@ -945,9 +973,14 @@ async function handleSetup(interaction) {
     }
     // preseason / conf_champ: phaseKey already set, sub stays 0
 
+    // Derive week: regular = sub+1, preseason = 1, bowl/offseason = 17 (post-regular-season)
+    const derivedWeek = phaseKey === 'regular'   ? currentSub + 1
+                      : phaseKey === 'preseason'  ? 1
+                      : 17; // bowl / offseason — assume regular season finished at week 17
+
     initialMeta = {
       season:            season,
-      week:              currentWeek,
+      week:              derivedWeek,
       current_phase:     phaseKey,
       current_sub_phase: currentSub,
     };
@@ -2602,7 +2635,7 @@ async function handleAdvance(interaction) {
   }
 
   // ── Week 15 skip prompt ───────────────────────────────────────────────────
-  // Week 15 = sub_phase 14 in regular season (0-indexed). Some leagues skip it.
+  // Week 15 = sub_phase 15 in regular season (0-indexed, Week 0–15). Some leagues skip it.
   // Ask the admin before committing so they can jump straight to conf champ.
   if (newPhase === 'regular' && newSub === 15) {
     const skipRow = new ActionRowBuilder().addComponents(
@@ -2750,6 +2783,61 @@ async function handleMoveCoach(interaction) {
   if (announceTarget && announceTarget.id !== interaction.channelId) {
     await announceTarget.send({ embeds: [embed] });
   }
+}
+
+
+// /set-phase ───────────────────────────────────────────────────────────
+async function handleSetPhase(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+
+  if (!isAdminUser(interaction)) return interaction.editReply({ content: '❌ Admin only.' });
+
+  const season   = interaction.options.getInteger('season');
+  const phaseKey = interaction.options.getString('phase');
+  const subInput = interaction.options.getInteger('sub');
+
+  const phaseDef = getPhaseByKey(phaseKey);
+
+  // Determine sub — if not provided use the phase's startSub default
+  let sub = subInput !== null ? subInput : phaseDef.startSub;
+
+  // Validate sub range
+  const maxSub = phaseDef.startSub + phaseDef.subWeeks - 1;
+  if (sub < phaseDef.startSub || sub > maxSub) {
+    return interaction.editReply({
+      content: `❌ **Invalid sub-phase for ${phaseDef.name}**\nValid range: ${phaseDef.startSub}–${maxSub}. You entered: ${sub}.`,
+    });
+  }
+
+  // Derive week the same way advance does
+  const week = phaseKey === 'regular'  ? sub + 1
+             : phaseKey === 'preseason' ? 1
+             : 17; // bowl / offseason — post-regular-season
+
+  await setMeta(guildId, {
+    season,
+    week,
+    current_phase:     phaseKey,
+    current_sub_phase: sub,
+  });
+
+  const label = formatPhase(phaseKey, sub);
+
+  const embed = new EmbedBuilder()
+    .setTitle('📅 Phase Updated')
+    .setColor(config.embed_color_primary_int || 0x1e90ff)
+    .setDescription(`League phase has been manually updated.`)
+    .addFields(
+      { name: 'Season',  value: `Season ${season}`,    inline: true },
+      { name: 'Phase',   value: label,                 inline: true },
+      { name: 'Week',    value: `Week ${week}`,         inline: true },
+      { name: 'Sub-Phase Index', value: `${sub}`,      inline: true },
+    )
+    .setFooter({ text: 'Use /advance to continue advancing from this point.' });
+
+  await interaction.editReply({ embeds: [embed] });
 }
 
 // /help ──────────────────────────────────────────────
@@ -2909,6 +2997,13 @@ async function handleHelp(interaction) {
       title:     '🔧 `/checkpermissions`',
       usage:     '/checkpermissions',
       desc:      "Audit the bot's permissions across all configured channels and confirm everything is set up correctly.",
+    },
+    {
+      flag:      null,
+      adminOnly: true,
+      title:     '📅 `/set-phase`',
+      usage:     '/set-phase season: <n> phase: <phase> sub: <n>',
+      desc:      "Manually set the current season, phase, and sub-week. Use to correct the league state if it gets out of sync. /advance will continue from wherever you set it.",
     },
   ];
 
@@ -3265,6 +3360,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'resetteam':         return handleResetTeam(interaction);
         case 'listteams':         return handleListTeams(interaction);
         case 'advance':           return handleAdvance(interaction);
+        case 'set-phase':          return handleSetPhase(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
         case 'streamer':          return handleStreaming(interaction);
         case 'config':
