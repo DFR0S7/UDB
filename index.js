@@ -657,18 +657,21 @@ async function replySetupRequired(interaction) {
 async function handleSetup(interaction) {
   const guildId = interaction.guildId;
   const userId  = interaction.user.id;
-  // Acknowledge immediately — DM creation can take >3 seconds
-  await interaction.reply({ content: '📬 Check your DMs — setup wizard is waiting!', flags: 64 });
+  // Acknowledge immediately — must happen within 3 seconds
+  await interaction.reply({ content: '📬 Check your DMs — setup wizard is starting!', flags: 64 });
 
-  // Fetch guild — interaction.guild can be null if not cached (e.g. new server)
-  const guild = interaction.guild || await client.guilds.fetch(guildId).catch(() => null);
+  // Fetch guild with full data — use fetch({force:true}) to bypass stale cache
+  let guild = interaction.guild;
+  if (!guild) {
+    guild = await client.guilds.fetch({ guild: guildId, force: true }).catch(() => null);
+  }
   if (!guild) {
     return interaction.followUp({ content: '❌ **Setup Failed**\nCould not load server data. Please try again in a moment.', flags: 64 });
   }
 
-  // Ensure channels and members are cached
+  // Populate channel and role caches
   await guild.channels.fetch().catch(() => {});
-  await guild.members.fetch({ user: userId }).catch(() => {});
+  await guild.roles.fetch().catch(() => {});
 
   let dm;
   try {
@@ -2955,10 +2958,13 @@ async function handleHelp(interaction) {
 // /checkpermissions ───────────────────────────────────
 async function handleCheckPermissions(interaction) {
   const guildId   = interaction.guildId;
-  const guild     = interaction.guild;
   await interaction.deferReply({ flags: 64 });
+  const guild = interaction.guild || await client.guilds.fetch({ guild: guildId, force: true }).catch(() => null);
+  if (!guild) return interaction.editReply({ content: '❌ Could not load server data. Please try again.' });
+  await guild.channels.fetch().catch(() => {});
   const config    = await getConfig(guildId);
-  const botMember = guild.members.cache.get(client.user.id) || await guild.members.fetch(client.user.id);
+  const botMember = guild.members.cache.get(client.user.id) || await guild.members.fetch(client.user.id).catch(() => null);
+  if (!botMember) return interaction.editReply({ content: '❌ Could not fetch bot member data. Please try again.' });
 
   const REQUIRED = ['ViewChannel', 'SendMessages', 'EmbedLinks', 'ReadMessageHistory'];
 
