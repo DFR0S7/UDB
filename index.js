@@ -2247,8 +2247,6 @@ async function handleAssignTeam(interaction) {
   const teamName = interaction.options.getString('team');
   const skipAnn  = interaction.options.getBoolean('skip-announcement') || false;
 
-  await interaction.deferReply();
-
   let team;
   try { team = await getTeamByName(teamName, guildId); }
   catch (err) { return interaction.editReply(`❌ **Database Error**\nCouldn't look up team "${teamName}": ${err.message}`); }
@@ -2800,7 +2798,7 @@ async function handleHelp(interaction) {
       adminOnly: false,
       title:     '🔔 Game Results Reminder',
       usage:     '(automatic)',
-      desc:      `After a stream link is posted in the streaming channel, the bot sends a reminder to submit your result after ${config.stream_reminder_minutes || 45} minutes.`,
+      desc:      `After a game result is submitted, the bot sends a reminder to any coaches who haven't submitted theirs yet after ${config.stream_reminder_minutes || 45} minutes.`,
     },
     // ── Team Selection ─────────────────────────────────────────────────────
     {
@@ -3169,7 +3167,7 @@ async function handleAutocomplete(interaction) {
       { label: 'Max Star Rating',         key: 'star_rating_max_for_offers', hint: 'Maximum star rating for job offers' },
       { label: 'Offers Per User',         key: 'job_offers_count',           hint: 'Number of offers per user' },
       { label: 'Offer Expiry Hours',      key: 'job_offers_expiry_hours',    hint: 'Hours before offers expire (1–24)' },
-      { label: 'Stream Reminder Minutes', key: 'stream_reminder_minutes',    hint: 'Minutes before stream reminder fires' },
+      { label: 'Game Results Reminder (Minutes)', key: 'stream_reminder_minutes',    hint: 'Minutes after result is submitted to send reminder' },
       { label: 'Advance Intervals',       key: 'advance_intervals',          hint: 'Available advance intervals e.g. [24,48]' },
       { label: 'Primary Embed Color',     key: 'embed_color_primary',        hint: 'Primary embed color hex e.g. 0x1e90ff' },
       { label: 'Win Embed Color',         key: 'embed_color_win',            hint: 'Win result embed color hex' },
