@@ -532,6 +532,7 @@ function buildCommands() {
       .addSubcommand(sub => sub.setName('view').setDescription('View current configuration'))
       .addSubcommand(sub => sub.setName('features').setDescription('Toggle features on/off'))
       .addSubcommand(sub => sub.setName('reload').setDescription('Reload config from database'))
+      .addSubcommand(sub => sub.setName('timezones').setDescription('Configure timezones shown on advance deadline posts'))
       .addSubcommand(sub =>
         sub.setName('edit')
           .setDescription('Edit a specific config value')
@@ -1602,6 +1603,79 @@ async function handleConfigEdit(interaction) {
   } catch (err) {
     await interaction.editReply({ content: `❌ **Failed to Save Setting**\nDatabase error: ${err.message}\n\nTry running \`/config reload\` then attempt the edit again. If this keeps happening, check your Supabase connection.` });
   }
+}
+
+// /config timezones ─────────────────────────────────────
+async function handleConfigTimezones(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+
+  const TZ_OPTIONS = [
+    { id: 'ET',   label: '🌴 ET  (New York)'    },
+    { id: 'CT',   label: '🌵 CT  (Chicago)'     },
+    { id: 'MT',   label: '🏔️ MT  (Denver)'      },
+    { id: 'PT',   label: '🌊 PT  (Los Angeles)' },
+    { id: 'GMT',  label: '🌐 GMT (London)'      },
+    { id: 'AEST', label: '🦘 AEST (Sydney)'     },
+    { id: 'NZST', label: '🥝 NZST (Auckland)'  },
+  ];
+
+  const current = config.advance_timezones_parsed || ['ET','CT','MT','PT'];
+  const selected = new Set(current);
+
+  const buildRows = () => {
+    const rows = [];
+    for (let i = 0; i < TZ_OPTIONS.length; i += 4) {
+      rows.push(new ActionRowBuilder().addComponents(
+        TZ_OPTIONS.slice(i, i + 4).map(tz =>
+          new ButtonBuilder()
+            .setCustomId(`tz_${tz.id}`)
+            .setLabel((selected.has(tz.id) ? '✅ ' : '') + tz.label)
+            .setStyle(selected.has(tz.id) ? ButtonStyle.Success : ButtonStyle.Secondary)
+        )
+      ));
+    }
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('tz_DONE').setLabel('✔ Save').setStyle(ButtonStyle.Primary),
+    ));
+    return rows;
+  };
+
+  const msg = await interaction.editReply({
+    content: '📡 **Advance Timezones**\nToggle which timezones appear on advance deadline posts, then click **Save**.',
+    components: buildRows(),
+  });
+
+  const collector = msg.createMessageComponentCollector({
+    filter: i => i.user.id === interaction.user.id,
+    time: 120000,
+  });
+
+  collector.on('collect', async btn => {
+    const id = btn.customId.replace('tz_', '');
+    if (id === 'DONE') {
+      collector.stop('done');
+      const finalTZs = [...selected];
+      if (finalTZs.length === 0) {
+        await btn.update({ content: '❌ You must select at least one timezone.', components: buildRows() });
+        return;
+      }
+      await saveConfig(guildId, { advance_timezones: JSON.stringify(finalTZs) });
+      guildConfigs.delete(guildId);
+      const labels = finalTZs.map(k => TZ_OPTIONS.find(t => t.id === k)?.label || k).join(', ');
+      await btn.update({ content: `✅ **Timezones saved:** ${labels}`, components: [] });
+    } else {
+      selected.has(id) ? selected.delete(id) : selected.add(id);
+      await btn.update({ components: buildRows() });
+    }
+  });
+
+  collector.on('end', async (_, reason) => {
+    if (reason !== 'done') {
+      await interaction.editReply({ content: '⏰ Timed out — timezones not saved.', components: [] }).catch(() => {});
+    }
+  });
 }
 
 // /config reload ──────────────────────────────────────
@@ -3069,7 +3143,7 @@ async function handleAutocomplete(interaction) {
       { label: 'Signed Coaches Channel',  key: 'channel_signed_coaches',     hint: 'Channel for signing announcements' },
       { label: 'Streaming Channel',       key: 'channel_streaming',          hint: 'Channel to monitor for stream links' },
       { label: 'Head Coach Role',         key: 'role_head_coach',            hint: 'Role assigned to coaches' },
-      { label: 'Advance Timezones',        key: 'advance_timezones',          hint: 'JSON array e.g. ["ET","CT","AEST"]' },
+
       { label: 'Min Star Rating',         key: 'star_rating_for_offers',     hint: 'Minimum star rating for job offers' },
       { label: 'Max Star Rating',         key: 'star_rating_max_for_offers', hint: 'Maximum star rating for job offers' },
       { label: 'Offers Per User',         key: 'job_offers_count',           hint: 'Number of offers per user' },
@@ -3179,7 +3253,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             case 'view':     return handleConfigView(interaction);
             case 'features': return handleConfigFeatures(interaction);
             case 'edit':     return handleConfigEdit(interaction);
-            case 'reload':   return handleConfigReload(interaction);
+            case 'reload':     return handleConfigReload(interaction);
+            case 'timezones':  return handleConfigTimezones(interaction);
           }
           break;
       }
