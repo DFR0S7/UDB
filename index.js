@@ -2072,8 +2072,9 @@ async function handleGameResult(interaction) {
     yourRecord.losses++; oppRecord.wins++;
   }
 
+  // Only write records for assigned teams to avoid bloating the DB with unmanaged teams
   await upsertRecord({ ...yourRecord, team_id: yourTeam.id, season: meta.season, guild_id: guildId });
-  await upsertRecord({ ...oppRecord,  team_id: oppTeam.id,  season: meta.season, guild_id: guildId });
+  if (oppTeam.user_id) await upsertRecord({ ...oppRecord, team_id: oppTeam.id, season: meta.season, guild_id: guildId });
 
   await supabase.from('results').insert({
     guild_id: guildId, season: meta.season, week: meta.week,
@@ -2152,8 +2153,9 @@ async function handleAnyGameResult(interaction) {
   if      (score1 > score2) { record1.wins++;  record2.losses++; }
   else if (score2 > score1) { record2.wins++;  record1.losses++; }
 
-  await upsertRecord({ ...record1, team_id: team1.id, season: meta.season, guild_id: guildId });
-  await upsertRecord({ ...record2, team_id: team2.id, season: meta.season, guild_id: guildId });
+  // Only write records for assigned teams to avoid bloating the DB with unmanaged teams
+  if (team1.user_id) await upsertRecord({ ...record1, team_id: team1.id, season: meta.season, guild_id: guildId });
+  if (team2.user_id) await upsertRecord({ ...record2, team_id: team2.id, season: meta.season, guild_id: guildId });
 
   await supabase.from('results').insert({
     guild_id: guildId, season: meta.season, week,
@@ -2197,16 +2199,21 @@ async function handleRanking(interaction) {
   const meta = await getMeta(interaction.guildId);
   const { data: records } = await supabase
     .from('records')
-    .select('*, teams(team_name)')
+    .select('*, teams(team_name, team_assignments(user_id))')
     .eq('guild_id', interaction.guildId)
     .eq('season', meta.season)
     .order('wins', { ascending: false });
 
-  if (!records || records.length === 0) {
+  // Filter to only teams currently assigned in this guild
+  const assignedRecords = (records || []).filter(r =>
+    r.teams?.team_assignments?.some(a => a.user_id)
+  );
+
+  if (!assignedRecords || assignedRecords.length === 0) {
     return interaction.editReply({ content: '❌ **No Records Yet**\nNo game results have been submitted for this season. Records will appear here once coaches start submitting results with `/game-result`.' });
   }
 
-  const lines = records.map((r, i) =>
+  const lines = assignedRecords.map((r, i) =>
     `**${i + 1}.** ${r.teams?.team_name || `Team ${r.team_id}`} — ${r.wins}W - ${r.losses}L`
   );
 
@@ -2234,15 +2241,20 @@ async function handleRankingAllTime(interaction) {
 
   const { data: records } = await supabase
     .from('records')
-    .select('team_id, wins, losses, teams(team_name)')
+    .select('team_id, wins, losses, teams(team_name, team_assignments(user_id))')
     .eq('guild_id', interaction.guildId);
 
-  if (!records || records.length === 0) {
+  // Filter to only teams currently assigned in this guild
+  const assignedRecords = (records || []).filter(r =>
+    r.teams?.team_assignments?.some(a => a.user_id)
+  );
+
+  if (!assignedRecords || assignedRecords.length === 0) {
     return interaction.editReply({ content: '❌ **No Records Found**\nNo game results exist yet. Records will appear here once coaches submit results with `/game-result`.' });
   }
 
   const totals = {};
-  for (const r of records) {
+  for (const r of assignedRecords) {
     const name = r.teams?.team_name || r.team_id;
     if (!totals[name]) totals[name] = { wins: 0, losses: 0 };
     totals[name].wins   += r.wins   || 0;
