@@ -1249,7 +1249,7 @@ async function handleSetup(interaction) {
     if (needsTeamList)  summaryFields.push({ name: 'Team Lists',      value: '#' + channelConfig.channel_team_lists,      inline: true });
     if (needsAdvance)   summaryFields.push({ name: 'Advance Tracker', value: '#' + channelConfig.channel_advance_tracker, inline: true });
     if (needsStreaming) summaryFields.push({ name: 'Streaming',       value: '#' + channelConfig.channel_streaming,       inline: true });
-    summaryFields.push({ name: 'Head Coach Role', value: '@' + headCoachRoleName, inline: true });
+    summaryFields.push({ name: 'Head Coach Role', value: headCoachRoleId ? `@${headCoachRoleName}` : '@everyone (no role assigned)', inline: true });
     summaryFields.push({ name: '\u200b', value: '\u200b', inline: true });
 
     if (features.feature_job_offers) {
@@ -2942,7 +2942,8 @@ async function handleHelp(interaction) {
         ? `Showing all **${visible.length}** commands available on this server. Disabled features are hidden.`
         : `Showing **${visible.length}** commands available to you. Ask an admin to enable additional features.`
     )
-    .addFields(pages[0]);
+    .addFields(pages[0])
+    .setFooter({ text: '🔗 Invite Dynasty Bot: http://bit.ly/46t7pjs' });
 
   await interaction.editReply({ embeds: [embed] });
 
@@ -3363,7 +3364,8 @@ async function initGuild(guild) {
       `• Channel assignments\n` +
       `• Role assignments\n` +
       `• Feature-specific settings\n\n` +
-      `Until setup is complete, commands will not be available to members.`;
+      `Until setup is complete, commands will not be available to members.\n\n` +
+      `⚠️ **Important:** Make sure the bot was invited using the correct link to ensure it has the right permissions:\nhttp://bit.ly/46t7pjs`;
 
     // Try DM first
     let dmSent = false;
