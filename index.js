@@ -657,10 +657,18 @@ async function replySetupRequired(interaction) {
 async function handleSetup(interaction) {
   const guildId = interaction.guildId;
   const userId  = interaction.user.id;
-  const guild   = interaction.guild;
-
   // Acknowledge immediately — DM creation can take >3 seconds
   await interaction.reply({ content: '📬 Check your DMs — setup wizard is waiting!', flags: 64 });
+
+  // Fetch guild — interaction.guild can be null if not cached (e.g. new server)
+  const guild = interaction.guild || await client.guilds.fetch(guildId).catch(() => null);
+  if (!guild) {
+    return interaction.followUp({ content: '❌ **Setup Failed**\nCould not load server data. Please try again in a moment.', flags: 64 });
+  }
+
+  // Ensure channels and members are cached
+  await guild.channels.fetch().catch(() => {});
+  await guild.members.fetch({ user: userId }).catch(() => {});
 
   let dm;
   try {
