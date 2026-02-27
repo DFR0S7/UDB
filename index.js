@@ -1215,7 +1215,7 @@ async function handleSetup(interaction) {
       '**— Advance Timezones —**\nWhich timezones should appear on advance deadline posts? Select all that apply.',
       [
         { id: 'ET',   label: '🌴 ET  (New York)'    },
-        { id: 'CT',   label: '🌵 CT  (Chicago)'     },
+        { id: 'CT',   label: '🐄 CT  (Chicago)'     },
         { id: 'MT',   label: '🏔️ MT  (Denver)'      },
         { id: 'PT',   label: '🌊 PT  (Los Angeles)' },
         { id: 'GMT',  label: '🌐 GMT (London)'      },
@@ -1667,7 +1667,7 @@ async function handleConfigTimezones(interaction) {
 
   const TZ_OPTIONS = [
     { id: 'ET',   label: '🌴 ET  (New York)'    },
-    { id: 'CT',   label: '🌵 CT  (Chicago)'     },
+    { id: 'CT',   label: '🐄 CT  (Chicago)'     },
     { id: 'MT',   label: '🏔️ MT  (Denver)'      },
     { id: 'PT',   label: '🌊 PT  (Los Angeles)' },
     { id: 'GMT',  label: '🌐 GMT (London)'      },
@@ -2692,7 +2692,7 @@ async function handleAdvance(interaction) {
 
   const TZ_MAP = {
     ET:   { label: '🌴 ET',   iana: 'America/New_York'    },
-    CT:   { label: '🌵 CT',   iana: 'America/Chicago'     },
+    CT:   { label: '🐄 CT',   iana: 'America/Chicago'     },
     MT:   { label: '🏔️ MT',   iana: 'America/Denver'      },
     PT:   { label: '🌊 PT',   iana: 'America/Los_Angeles' },
     GMT:  { label: '🌐 GMT',  iana: 'Europe/London'       },
