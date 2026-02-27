@@ -50,7 +50,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
-  partials: [Partials.Channel, Partials.Message],
+  partials: [Partials.Channel, Partials.Message, Partials.User],
 });
 
 // =====================================================
@@ -815,6 +815,7 @@ async function handleSetup(interaction) {
   const pickRole    = (question, roles)    => pickFromList(question, roles,    'role', r => '@' + r.name);
 
   // ── Fetch guild resources ─────────────────────────────────────────────────
+  try {
   const textChannels = [...guild.channels.cache
     .filter(c => c.type === ChannelType.GuildText)
     .sort((a, b) => a.name.localeCompare(b.name))
@@ -1262,6 +1263,10 @@ async function handleSetup(interaction) {
     console.error('[setup] Error saving config:', err);
     await dm.send(`❌ Setup failed: ${err.message}`);
   }
+  } catch (err) {
+    console.error('[setup] Unexpected error:', err);
+    await dm.send(`❌ **Setup Failed — Unexpected Error**\n\`${err.message}\`\n\nPlease try running \`/setup\` again.`).catch(() => {});
+  }
 }
 
 // /streamer ──────────────────────────────────────────
@@ -1385,7 +1390,8 @@ async function handleConfigView(interaction) {
         `Job Offers Count: \`${config.job_offers_count}\`\n` +
         `Offers Expire: \`${config.job_offers_expiry_hours}hrs\`\n` +
         `Results Reminder: \`${config.stream_reminder_minutes} min\`\n` +
-        `Advance Intervals: \`${config.advance_intervals}\``,
+        `Advance Intervals: \`${config.advance_intervals}\`\n` +
+        `Timezones: \`${(config.advance_timezones_parsed || ['ET','CT','MT','PT']).join(', ')}\` — change with \`/config timezones\``,
         inline: true },
     );
   await interaction.editReply({ embeds: [embed] });
