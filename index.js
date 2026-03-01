@@ -153,7 +153,6 @@ const CONFIG_DEFAULTS = {
   feature_list_teams:           false,
   feature_move_coach:           false,
   feature_advance:              false,
-  feature_season_advance:       false,
   feature_stream_autopost:      false,
   feature_streaming_list:       false,
   // ── Channels ──────────────────────────────────
@@ -409,6 +408,72 @@ async function setMeta(guildId, updates) {
   await supabase.from('meta').upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' });
 }
 
+
+// ── Job Offer Config helpers ──────────────────────────────────────────────
+async function getJobOfferConfig(guildId) {
+  const { data } = await supabase
+    .from('job_offer_config')
+    .select('*')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  return {
+    one_per_conference: false,
+    weighted_ratings:   'off',
+    conf_balance:       false,
+    ...( data || {} ),
+  };
+}
+
+async function setJobOfferConfig(guildId, updates) {
+  await supabase.from('job_offer_config').upsert(
+    { guild_id: guildId, ...updates },
+    { onConflict: 'guild_id' }
+  );
+}
+
+async function getJobOfferConferences(guildId, mode) {
+  const { data } = await supabase
+    .from('job_offer_conferences')
+    .select('conference')
+    .eq('guild_id', guildId)
+    .eq('mode', mode);
+  return (data || []).map(r => r.conference);
+}
+
+async function toggleJobOfferConference(guildId, conference, mode) {
+  // Returns true if now active, false if removed
+  const { data: existing } = await supabase
+    .from('job_offer_conferences')
+    .select('conference')
+    .eq('guild_id', guildId)
+    .eq('conference', conference)
+    .eq('mode', mode)
+    .maybeSingle();
+
+  if (existing) {
+    await supabase.from('job_offer_conferences')
+      .delete()
+      .eq('guild_id', guildId)
+      .eq('conference', conference)
+      .eq('mode', mode);
+    return false;
+  } else {
+    await supabase.from('job_offer_conferences')
+      .insert({ guild_id: guildId, conference, mode });
+    return true;
+  }
+}
+
+async function getDistinctConferences() {
+  const { data } = await supabase
+    .from('teams')
+    .select('conference')
+    .not('conference', 'is', null)
+    .neq('conference', 'FCS');
+  const unique = [...new Set((data || []).map(r => r.conference).filter(Boolean))].sort();
+  return unique;
+}
+
 async function getRecord(teamId, season, guildId) {
   const { data } = await supabase
     .from('records')
@@ -648,6 +713,10 @@ function buildCommands() {
     new SlashCommandBuilder()
       .setName('reload-commands')
       .setDescription('[Admin] Force re-register all slash commands with Discord.'),
+
+    new SlashCommandBuilder()
+      .setName('offers-config')
+      .setDescription('[Admin] Configure job offer conference rules and weighting.'),
 
   ].map(cmd => cmd.toJSON());
 }
@@ -1297,6 +1366,9 @@ async function handleSetup(interaction) {
         { name: 'Offer Expiry',    value: jobOffersConfig.job_offers_expiry_hours + ' hrs',                                                              inline: true },
       );
     }
+    if (features.feature_job_offers) {
+      summaryFields.push({ name: '💡 Offers Config', value: 'Use `/offers-config` after setup to control conference balancing, weighting, and whitelists/blacklists.', inline: false });
+    }
     if (features.feature_game_results_reminder) summaryFields.push({ name: 'Results Reminder',  value: streamConfig.stream_reminder_minutes + ' min', inline: true });
     if (features.feature_advance)               summaryFields.push({ name: 'Advance Intervals', value: advanceConfig.advance_intervals,               inline: true });
 
@@ -1784,23 +1856,77 @@ async function handleJobOffers(interaction) {
     .from('teams')
     .select('*')
     .gte('star_rating', config.star_rating_for_offers)
-    .order('star_rating', { ascending: false })
-    .limit(50);
+    .neq('conference', 'FCS')
+    .limit(200);
 
   if (config.star_rating_max_for_offers) {
     query = query.lte('star_rating', config.star_rating_max_for_offers);
   }
 
   const { data: availableJobs } = await query;
-  const pool = (availableJobs || []).filter(t => !assigned.includes(t.id) && !locked.includes(t.id));
+  let pool = (availableJobs || []).filter(t => !assigned.includes(t.id) && !locked.includes(t.id));
+
+  // ── Apply conference whitelist / blacklist ────────────────────────────────
+  const offerCfg    = await getJobOfferConfig(guildId);
+  const whitelist   = await getJobOfferConferences(guildId, 'whitelist');
+  const blacklist   = await getJobOfferConferences(guildId, 'blacklist');
+
+  if (whitelist.length > 0) pool = pool.filter(t => whitelist.includes(t.conference));
+  if (blacklist.length > 0) pool = pool.filter(t => !blacklist.includes(t.conference));
 
   if (pool.length === 0) {
     return interaction.editReply({
-      content: `❌ **No Available Teams**\nThere are no unassigned teams with a **${config.star_rating_for_offers}⭐ or higher** rating right now.\n\nPossible reasons:\n• All eligible teams are taken\n• All eligible teams are locked in active offers\n• The star rating range in config is too narrow\n\nAn admin can adjust the range with \`/config edit\`.`,
+      content: `❌ **No Available Teams**\nThere are no unassigned teams matching the current offer settings.\n\nPossible reasons:\n• All eligible teams are taken or locked\n• Conference whitelist/blacklist is too restrictive\n• Star rating range is too narrow\n\nAn admin can adjust settings with \`/config edit\` or \`/offers-config\`.`,
     });
   }
 
-  const picks      = pool.sort(() => Math.random() - 0.5).slice(0, config.job_offers_count);
+  // ── Weighted ratings ──────────────────────────────────────────────────────
+  let weightedPool;
+  if (offerCfg.weighted_ratings === 'highest') {
+    // Weight by star rating — higher rated = more likely
+    weightedPool = pool.flatMap(t => Array(Math.round((t.star_rating || 1) * 2)).fill(t));
+  } else if (offerCfg.weighted_ratings === 'lowest') {
+    // Inverse weight — lower rated = more likely
+    const max = Math.max(...pool.map(t => t.star_rating || 1));
+    weightedPool = pool.flatMap(t => Array(Math.round((max - (t.star_rating || 1) + 1) * 2)).fill(t));
+  } else {
+    weightedPool = pool;
+  }
+
+  // ── Pick with optional conference rules ───────────────────────────────────
+  const count    = config.job_offers_count || 3;
+  const shuffled = weightedPool.sort(() => Math.random() - 0.5);
+  let picks      = [];
+  const usedConfs = new Set();
+
+  for (const t of shuffled) {
+    if (picks.find(p => p.id === t.id)) continue; // dedupe from weighting
+
+    if (offerCfg.one_per_conference && usedConfs.has(t.conference)) continue;
+
+    if (offerCfg.conf_balance && usedConfs.has(t.conference) && picks.length < count) {
+      // Try to keep going for a different conference
+      const remaining = shuffled.filter(s =>
+        !picks.find(p => p.id === s.id) && !usedConfs.has(s.conference)
+      );
+      if (remaining.length > 0) continue;
+      // No more unique conferences available — allow duplicate
+    }
+
+    picks.push(t);
+    usedConfs.add(t.conference);
+    if (picks.length >= count) break;
+  }
+
+  // Fallback: if strict rules left us short, fill remainder ignoring conf rules
+  if (picks.length < count) {
+    const remaining = pool.filter(t => !picks.find(p => p.id === t.id))
+                          .sort(() => Math.random() - 0.5);
+    for (const t of remaining) {
+      picks.push(t);
+      if (picks.length >= count) break;
+    }
+  }
   const expiresAt  = new Date(now.getTime() + (config.job_offers_expiry_hours || 48) * 60 * 60 * 1000);
 
   await supabase.from('job_offers').insert(
@@ -2802,6 +2928,174 @@ async function handleMoveCoach(interaction) {
 }
 
 
+// /offers-config ─────────────────────────────────────────────────────────
+async function handleOffersConfig(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+  if (!isAdminUser(interaction)) return interaction.editReply({ content: '❌ Admin only.' });
+
+  await showOffersConfigMenu(interaction, guildId, config);
+}
+
+async function showOffersConfigMenu(interaction, guildId, config, edit = false) {
+  const offerCfg = await getJobOfferConfig(guildId);
+  const whitelist = await getJobOfferConferences(guildId, 'whitelist');
+  const blacklist = await getJobOfferConferences(guildId, 'blacklist');
+
+  const weightLabel = offerCfg.weighted_ratings === 'highest' ? '⭐ Weighted: Highest'
+                    : offerCfg.weighted_ratings === 'lowest'  ? '⭐ Weighted: Lowest'
+                    : '⭐ Weighted: Off';
+
+  const embed = new EmbedBuilder()
+    .setTitle('⚙️ Job Offer Configuration')
+    .setColor(config.embed_color_primary_int || 0x1e90ff)
+    .setDescription('Toggle rules that apply when generating job offers. FCS teams are always excluded.')
+    .addFields(
+      { name: '🚫 Max 1 Per Conference', value: offerCfg.one_per_conference ? '✅ On'  : '❌ Off', inline: true },
+      { name: '⚖️ Conference Balance',   value: offerCfg.conf_balance       ? '✅ On'  : '❌ Off', inline: true },
+      { name: weightLabel,               value: offerCfg.weighted_ratings === 'off' ? '❌ Off' : '✅ On', inline: true },
+      { name: '✅ Whitelist',            value: whitelist.length > 0 ? whitelist.join(', ') : 'None (all allowed)', inline: true },
+      { name: '🚫 Blacklist',            value: blacklist.length > 0 ? blacklist.join(', ') : 'None',               inline: true },
+    );
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('ofc_one_per_conf')
+      .setLabel(offerCfg.one_per_conference ? '✅ 1 Per Conference' : '❌ 1 Per Conference')
+      .setStyle(offerCfg.one_per_conference ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('ofc_balance')
+      .setLabel(offerCfg.conf_balance ? '✅ Conf Balance' : '❌ Conf Balance')
+      .setStyle(offerCfg.conf_balance ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('ofc_weighted')
+      .setLabel(weightLabel)
+      .setStyle(offerCfg.weighted_ratings !== 'off' ? ButtonStyle.Success : ButtonStyle.Secondary),
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('ofc_whitelist')
+      .setLabel(`✅ Manage Whitelist${whitelist.length > 0 ? ` (${whitelist.length})` : ''}`)
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('ofc_blacklist')
+      .setLabel(`🚫 Manage Blacklist${blacklist.length > 0 ? ` (${blacklist.length})` : ''}`)
+      .setStyle(ButtonStyle.Primary),
+  );
+
+  const payload = { embeds: [embed], components: [row1, row2] };
+  const msg = edit
+    ? await interaction.editReply(payload)
+    : await interaction.editReply(payload);
+
+  // Collect button interaction
+  try {
+    const btn = await msg.awaitMessageComponent({
+      filter: i => i.user.id === interaction.user.id,
+      time: 120000,
+    });
+    await btn.deferUpdate();
+
+    if (btn.customId === 'ofc_one_per_conf') {
+      await setJobOfferConfig(guildId, { one_per_conference: !offerCfg.one_per_conference });
+      await showOffersConfigMenu(interaction, guildId, config, true);
+
+    } else if (btn.customId === 'ofc_balance') {
+      await setJobOfferConfig(guildId, { conf_balance: !offerCfg.conf_balance });
+      await showOffersConfigMenu(interaction, guildId, config, true);
+
+    } else if (btn.customId === 'ofc_weighted') {
+      // Cycle: off → highest → lowest → off
+      const next = offerCfg.weighted_ratings === 'off'     ? 'highest'
+                 : offerCfg.weighted_ratings === 'highest' ? 'lowest'
+                 : 'off';
+      await setJobOfferConfig(guildId, { weighted_ratings: next });
+      await showOffersConfigMenu(interaction, guildId, config, true);
+
+    } else if (btn.customId === 'ofc_whitelist') {
+      await showConferenceToggleMenu(interaction, guildId, config, 'whitelist');
+
+    } else if (btn.customId === 'ofc_blacklist') {
+      await showConferenceToggleMenu(interaction, guildId, config, 'blacklist');
+    }
+
+  } catch {
+    await interaction.editReply({ embeds: [embed], components: [] });
+  }
+}
+
+async function showConferenceToggleMenu(interaction, guildId, config, mode) {
+  const conferences = await getDistinctConferences();
+  const active      = await getJobOfferConferences(guildId, mode);
+  const modeLabel   = mode === 'whitelist' ? '✅ Whitelist' : '🚫 Blacklist';
+  const modeDesc    = mode === 'whitelist'
+    ? 'Only these conferences will appear in job offers. If empty, all are allowed.'
+    : 'These conferences will never appear in job offers.';
+
+  if (conferences.length === 0) {
+    await interaction.editReply({ content: '❌ No conferences found in the teams database.', components: [] });
+    return;
+  }
+
+  // Build toggle buttons — up to 25 (5 rows of 5)
+  const buttons = conferences.slice(0, 25).map(conf =>
+    new ButtonBuilder()
+      .setCustomId(`ofc_conf_${mode}_${conf}`)
+      .setLabel(active.includes(conf) ? `✅ ${conf}` : conf)
+      .setStyle(active.includes(conf) ? ButtonStyle.Success : ButtonStyle.Secondary)
+  );
+
+  // Add a Back button at the end
+  buttons.push(
+    new ButtonBuilder()
+      .setCustomId('ofc_back')
+      .setLabel('← Back')
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  // Chunk into rows of 5
+  const rows = [];
+  for (let i = 0; i < buttons.length; i += 5) {
+    rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${modeLabel} Conferences`)
+    .setColor(config.embed_color_primary_int || 0x1e90ff)
+    .setDescription(`${modeDesc}\n\nCurrently active: ${active.length > 0 ? active.join(', ') : 'None'}`);
+
+  const msg = await interaction.editReply({ embeds: [embed], components: rows });
+
+  try {
+    const btn = await msg.awaitMessageComponent({
+      filter: i => i.user.id === interaction.user.id,
+      time: 120000,
+    });
+    await btn.deferUpdate();
+
+    if (btn.customId === 'ofc_back') {
+      await showOffersConfigMenu(interaction, guildId, config, true);
+      return;
+    }
+
+    // Parse conference from customId: ofc_conf_{mode}_{conference}
+    const parts = btn.customId.split('_');
+    // customId format: ofc_conf_whitelist_Big Ten  (conference name may have spaces replaced)
+    const confName = conferences.find(c => `ofc_conf_${mode}_${c}` === btn.customId);
+    if (confName) {
+      await toggleJobOfferConference(guildId, confName, mode);
+    }
+
+    // Re-show the same screen to allow multiple toggles
+    await showConferenceToggleMenu(interaction, guildId, config, mode);
+
+  } catch {
+    await interaction.editReply({ embeds: [embed], components: [] });
+  }
+}
+
 // /reload-commands ───────────────────────────────────────────────────
 async function handleReloadCommands(interaction) {
   await interaction.deferReply({ flags: 64 });
@@ -2917,6 +3211,13 @@ async function handleHelp(interaction) {
       desc:      `After a game result is submitted, the bot sends a reminder to any coaches who haven't submitted theirs yet after ${config.stream_reminder_minutes || 45} minutes.`,
     },
     // ── Team Selection ─────────────────────────────────────────────────────
+    {
+      flag:      'feature_job_offers',
+      adminOnly: true,
+      title:     '⚙️ `/offers-config`',
+      usage:     '/offers-config',
+      desc:      'Configure conference rules and weighting for job offers. Toggle max-1-per-conference, conference balance, weighted ratings, and manage conference whitelists/blacklists.',
+    },
     {
       flag:      'feature_job_offers',
       adminOnly: false,
@@ -3380,6 +3681,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'help':              return handleHelp(interaction);
         case 'checkpermissions':  return handleCheckPermissions(interaction);
         case 'joboffers':         return handleJobOffers(interaction);
+        case 'offers-config':     return handleOffersConfig(interaction);
         case 'game-result':       return handleGameResult(interaction);
         case 'any-game-result':   return handleAnyGameResult(interaction);
         case 'ranking':           return handleRanking(interaction);
