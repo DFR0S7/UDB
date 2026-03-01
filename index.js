@@ -2933,7 +2933,8 @@ async function handleOffersConfig(interaction) {
   await interaction.deferReply({ flags: 64 });
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
-  if (!isAdminUser(interaction)) return interaction.editReply({ content: '❌ Admin only.' });
+  const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
 
   await showOffersConfigMenu(interaction, guildId, config);
 }
@@ -3099,7 +3100,8 @@ async function showConferenceToggleMenu(interaction, guildId, config, mode) {
 // /reload-commands ───────────────────────────────────────────────────
 async function handleReloadCommands(interaction) {
   await interaction.deferReply({ flags: 64 });
-  if (!isAdminUser(interaction)) return interaction.editReply({ content: '❌ Admin only.' });
+  const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
   try {
     await registerCommands();
     await interaction.editReply({ content: '✅ **Commands re-registered.** New commands may take up to a minute to appear in Discord.' });
@@ -3114,7 +3116,8 @@ async function handleSetPhase(interaction) {
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
 
-  if (!isAdminUser(interaction)) return interaction.editReply({ content: '❌ Admin only.' });
+  const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
 
   const season   = interaction.options.getInteger('season');
   const phaseKey = interaction.options.getString('phase');
