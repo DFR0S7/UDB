@@ -59,7 +59,7 @@ const client = new Client({
 // =====================================================
 const PHASE_CYCLE = [
   { key: 'preseason',           name: 'Preseason',               subWeeks: 1,  startSub: 0, format: ()    => 'Preseason' },
-  { key: 'regular',             name: 'Regular Season',          subWeeks: 16, startSub: 0, format: (sub) => `Week ${sub}` },
+  { key: 'regular',             name: 'Regular Season',          subWeeks: 15, startSub: 0, format: (sub) => `Week ${sub}` },
   { key: 'conf_champ',          name: 'Conference Championship', subWeeks: 1,  startSub: 0, format: ()    => 'Conference Championship' },
   { key: 'bowl',                name: 'Bowl Season',             subWeeks: 4,  startSub: 0, format: (sub) => {
     const labels = ['Bowl Week 1', 'Bowl Week 2', 'Semifinals', 'National Championship'];
@@ -705,7 +705,7 @@ function buildCommands() {
       )
       .addIntegerOption(o => o
         .setName('sub')
-        .setDescription('Sub-phase index. Regular: 0–15 (week). Bowl: 0–3. Transfer: 0–3 (displays as Week 1–4). Others: 0.')
+        .setDescription('Sub-phase index. Regular: 0–14 (week). Bowl: 0–3. Transfer: 0–3 (displays as Week 1–4). Others: 0.')
         .setRequired(false)
         .setMinValue(0)
       ),
@@ -992,15 +992,15 @@ async function handleSetup(interaction) {
     if (phaseGroup === 'regular') {
       let validWeek = false;
       while (!validWeek) {
-        const weekStr = await ask('**[League 6/?]** What week of the regular season? (0–15)\nExample: `8`');
+        const weekStr = await ask('**[League 6/?]** What week of the regular season? (0–14)\nExample: `8`');
         if (!weekStr) return;
         const parsed = parseInt(weekStr);
-        if (!isNaN(parsed) && parsed >= 0 && parsed <= 15) {
+        if (!isNaN(parsed) && parsed >= 0 && parsed <= 14) {
           currentWeek = parsed;
           currentSub  = parsed;
           validWeek   = true;
         } else {
-          await dm.send('❌ Please enter a number between 0 and 15.');
+          await dm.send('❌ Please enter a number between 0 and 14.');
         }
       }
 
@@ -2777,13 +2777,13 @@ async function handleAdvance(interaction) {
   }
 
   // ── Week 15 skip prompt ───────────────────────────────────────────────────
-  // Week 15 = sub_phase 15 in regular season (0-indexed, Week 0–15). Some leagues skip it.
+  // Week 14 = sub_phase 14 in regular season (0-indexed, Week 0–15). Some leagues skip it.
   // Ask the admin before committing so they can jump straight to conf champ.
-  if (newPhase === 'regular' && newSub === 15) {
+  if (newPhase === 'regular' && newSub === 14) {
     const skipRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId('advance_week15')
-        .setLabel('▶️ Continue to Week 15')
+        .setLabel('▶️ Continue to Week 14')
         .setStyle(ButtonStyle.Secondary),
       new ButtonBuilder()
         .setCustomId('advance_skip15')
@@ -2791,7 +2791,7 @@ async function handleAdvance(interaction) {
         .setStyle(ButtonStyle.Primary),
     );
     const promptMsg = await interaction.editReply({
-      content: '**Week 15 Prompt**\nSome leagues skip Week 15. What would you like to do?',
+      content: '**Week 14 Prompt**\nSome leagues skip Week 14. What would you like to do?',
       components: [skipRow],
     });
     try {
