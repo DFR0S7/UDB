@@ -3738,12 +3738,34 @@ client.on(Events.MessageCreate, async (message) => {
 
   if (message.channel.name?.toLowerCase() !== config.channel_streaming?.toLowerCase()) return;
 
-  // Extract a Twitch or YouTube URL from the message
+  // Extract a Twitch or YouTube URL from message content OR embeds (Wamellow posts via embed)
   const streamRegex = /https?:\/\/(?:www\.)?(?:twitch\.tv|youtube\.com\/(?:live\/|channel\/|@)?|youtu\.be\/)([^\s<>"'\/]+)/i;
-  const match = message.content.match(streamRegex);
-  if (!match) return;
 
-  const handle  = match[1].replace(/[?#].*$/, '').trim(); // strip query strings/fragments
+  let rawUrl = null;
+
+  // Check plain text content first
+  const contentMatch = message.content.match(streamRegex);
+  if (contentMatch) rawUrl = contentMatch[0];
+
+  // If not found in content, check embeds (Wamellow posts stream links as embeds)
+  if (!rawUrl && message.embeds?.length > 0) {
+    for (const embed of message.embeds) {
+      const searchTargets = [
+        embed.url,
+        embed.description,
+        embed.title,
+        ...(embed.fields || []).map(f => f.value),
+      ].filter(Boolean).join(' ');
+      const embedMatch = searchTargets.match(streamRegex);
+      if (embedMatch) { rawUrl = embedMatch[0]; break; }
+    }
+  }
+
+  if (!rawUrl) return;
+
+  const handleMatch = rawUrl.match(streamRegex);
+  if (!handleMatch) return;
+  const handle  = handleMatch[1].replace(/[?#].*$/, '').trim(); // strip query strings/fragments
   const minutes = config.stream_reminder_minutes || 45;
 
   if (isWamellow || message.author.bot) {
