@@ -50,7 +50,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
-  partials: [Partials.Channel, Partials.Message, Partials.User],
+  partials: [Partials.Channel, Partials.Message, Partials.User, Partials.GuildMember],
 });
 
 // =====================================================
@@ -615,9 +615,10 @@ function buildCommands() {
 
     new SlashCommandBuilder()
       .setName('resetteam')
-      .setDescription('Remove a user from their team (Admin only)')
+      .setDescription('Remove a coach from their team (Admin only)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addUserOption(o => o.setName('user').setDescription('User to reset').setRequired(true)),
+      .addUserOption(o => o.setName('user').setDescription('User to reset').setRequired(false))
+      .addStringOption(o => o.setName('team').setDescription('Team name — use if the coach already left the server').setRequired(false).setAutocomplete(true)),
 
     new SlashCommandBuilder()
       .setName('listteams')
@@ -2477,48 +2478,63 @@ async function handleResetTeam(interaction) {
   const config  = await getConfig(guildId);
   if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_reset_team) return interaction.editReply({ content: '❌ Team reset is disabled on this server.' });
-  const user    = interaction.options.getUser('user');
+  const user      = interaction.options.getUser('user');
+  const teamInput = interaction.options.getString('team');
 
-  const team = await getTeamByUser(user.id, guildId);
-  if (!team) {
-    return interaction.editReply({ content: `❌ **No Team Found**\n<@${user.id}> doesn't have a team assigned in this league. Nothing to reset.` });
+  if (!user && !teamInput) {
+    return interaction.editReply({ content: '❌ Please provide either a **user** or a **team name**.' });
+  }
+
+  let team, targetId;
+
+  if (user) {
+    // Normal flow — look up by user
+    targetId = user.id;
+    team = await getTeamByUser(targetId, guildId);
+    if (!team) return interaction.editReply({ content: `❌ **No Team Found**\n<@${targetId}> doesn't have a team assigned in this league.` });
+  } else {
+    // Team name flow — find the assignment directly
+    team = await getTeamByName(teamInput, guildId);
+    if (!team) return interaction.editReply({ content: `❌ **Team Not Found: \`${teamInput}\`**\nNo team with that name exists. Use the autocomplete dropdown.` });
+    if (!team.user_id) return interaction.editReply({ content: `❌ **No Coach Assigned**\n**${team.team_name}** doesn't have a coach assigned. Nothing to reset.` });
+    targetId = team.user_id;
   }
 
   await unassignTeam(team.id, guildId);
+  await removeCoachStream(guildId, targetId).catch(() => {});
 
-  await removeCoachStream(guildId, user.id).catch(err => {
-  console.warn('[reset] Failed to remove stream link:', err.message);
-});
-  
-  const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+  // Try to remove role if member is still in server
+  const member = await interaction.guild.members.fetch(targetId).catch(() => null);
   let roleWarning = '';
   if (member && config.role_head_coach_id) {
     try {
       await member.roles.remove(config.role_head_coach_id);
     } catch (roleErr) {
       console.error('[roles] Failed to remove head coach role on resetteam:', roleErr.message);
-      roleWarning = `\n⚠️ Couldn't remove the **${config.role_head_coach}** role — check bot role hierarchy in **Server Settings → Roles**.`;
+      roleWarning = `\n⚠️ Couldn't remove the **${config.role_head_coach}** role — check bot role hierarchy.`;
     }
   }
 
-  const signedChannel = findTextChannel(interaction.guild, config.channel_signed_coaches);
-  const newsChannel   = findTextChannel(interaction.guild, config.channel_news_feed);
+  const signedChannel  = findTextChannel(interaction.guild, config.channel_signed_coaches);
+  const newsChannel    = findTextChannel(interaction.guild, config.channel_news_feed);
   const announceTarget = signedChannel || newsChannel;
 
   const releaseEmbed = new EmbedBuilder()
     .setTitle(`🚪 Coach Released — ${team.team_name}`)
     .setColor(0xff4444)
-    .setDescription(`<@${user.id}> has been released from **${team.team_name}**.`)
+    .setDescription(member
+      ? `<@${targetId}> has been released from **${team.team_name}**.`
+      : `A coach who left the server has been removed from **${team.team_name}**.`)
     .addFields(
-      { name: 'Coach', value: `<@${user.id}>`, inline: true },
-      { name: 'Team',  value: team.team_name,   inline: true },
+      { name: 'Team',   value: team.team_name,                               inline: true },
+      { name: 'Status', value: '🟢 Now Available',                           inline: true },
     )
     .setTimestamp();
 
   if (announceTarget) await announceTarget.send({ embeds: [releaseEmbed] }).catch(() => {});
+  await postTeamList(interaction.guild, guildId, config).catch(() => {});
 
-  await interaction.editReply({ content: `✅ <@${user.id}> has been removed from **${team.team_name}**.${roleWarning}` });
-  
+  await interaction.editReply({ content: `✅ **${team.team_name}** has been reset and is now available.${roleWarning}` });
 }
 
 // /listteams ──────────────────────────────────────────
@@ -3544,8 +3560,8 @@ async function handleAutocomplete(interaction) {
         value: t.team_name,
       }));
 
-  } else if (commandName === 'resetteam') {
-    // Get assigned team_ids first (no join), then look up teams directly
+  } else if (commandName === 'resetteam' && focused.name === 'team') {
+    // Only autocomplete the team option — show assigned teams only
     const { data: assignments, error: aErr } = await supabase
       .from('team_assignments')
       .select('team_id')
@@ -3782,6 +3798,53 @@ client.on(Events.MessageCreate, async (message) => {
     // Coach posted their own link — tag them directly
     scheduleStreamReminder(message.channel, message.author.id, message.guildId, minutes);
   }
+});
+
+
+// =====================================================
+// MEMBER LEAVE — Auto-resign coach
+// =====================================================
+client.on(Events.GuildMemberRemove, async (member) => {
+  const guildId = member.guild.id;
+
+  const config = await getConfig(guildId).catch(() => null);
+  if (!config?.setup_complete) return;
+
+  // Check if this user had a team assigned
+  const team = await getTeamByUser(member.id, guildId).catch(() => null);
+  if (!team) return; // Not a coach, nothing to do
+
+  // Unassign the team
+  await unassignTeam(team.id, guildId).catch(() => {});
+
+  // Remove head coach role if applicable (member already left, so this is a no-op but safe)
+  // Remove stream registration
+  await removeCoachStream(guildId, member.id).catch(() => {});
+
+  // Post resignation announcement
+  const signedChannel = findTextChannel(member.guild, config.channel_signed_coaches);
+  const newsChannel   = findTextChannel(member.guild, config.channel_news_feed);
+  const target        = signedChannel || newsChannel;
+
+  if (target) {
+    const embed = new EmbedBuilder()
+      .setTitle('📋 Coach Resigned')
+      .setColor(0xff4444)
+      .setDescription(`**${member.displayName || member.user.username}** has left the server and resigned as head coach of **${team.team_name}**.`)
+      .addFields(
+        { name: 'Team',   value: team.team_name,                    inline: true },
+        { name: 'Status', value: '🟢 Now Available',                inline: true },
+      )
+      .setTimestamp()
+      .setFooter({ text: 'The position is now open for new applicants.' });
+
+    await target.send({ embeds: [embed] }).catch(() => {});
+  }
+
+  // Refresh team list
+  await postTeamList(member.guild, guildId, config).catch(() => {});
+
+  console.log(`[leave] ${member.user.username} left ${member.guild.name} — unassigned from ${team.team_name}`);
 });
 
 // =====================================================
