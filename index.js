@@ -2330,14 +2330,15 @@ async function handleRanking(interaction) {
   const meta = await getMeta(interaction.guildId);
   const { data: records } = await supabase
     .from('records')
-    .select('*, teams(team_name, team_assignments(user_id))')
+    .select('*, teams(team_name, team_assignments(user_id, guild_id))')
     .eq('guild_id', interaction.guildId)
     .eq('season', meta.season)
     .order('wins', { ascending: false });
 
-  // Filter to only teams currently assigned in this guild
+  // Filter to only teams assigned in THIS guild (team_assignments is cross-guild)
+  const guildId = interaction.guildId;
   const assignedRecords = (records || []).filter(r =>
-    r.teams?.team_assignments?.some(a => a.user_id)
+    r.teams?.team_assignments?.some(a => a.user_id && a.guild_id === guildId)
   );
 
   if (!assignedRecords || assignedRecords.length === 0) {
@@ -2372,12 +2373,13 @@ async function handleRankingAllTime(interaction) {
 
   const { data: records } = await supabase
     .from('records')
-    .select('team_id, wins, losses, teams(team_name, team_assignments(user_id))')
+    .select('team_id, wins, losses, teams(team_name, team_assignments(user_id, guild_id))')
     .eq('guild_id', interaction.guildId);
 
-  // Filter to only teams currently assigned in this guild
+  // Filter to only teams assigned in THIS guild (team_assignments is cross-guild)
+  const guildIdAT = interaction.guildId;
   const assignedRecords = (records || []).filter(r =>
-    r.teams?.team_assignments?.some(a => a.user_id)
+    r.teams?.team_assignments?.some(a => a.user_id && a.guild_id === guildIdAT)
   );
 
   if (!assignedRecords || assignedRecords.length === 0) {
@@ -2813,8 +2815,8 @@ async function handleAdvance(interaction) {
     }
   }
 
-  // ── Week 15 skip prompt ───────────────────────────────────────────────────
-  // Week 14 = sub_phase 14 in regular season (0-indexed, Week 0–15). Some leagues skip it.
+  // ── Week 14 skip prompt ───────────────────────────────────────────────────
+  // Week 14 = sub_phase 14 in regular season (0-indexed, Week 0–14). Some leagues skip it.
   // Ask the admin before committing so they can jump straight to conf champ.
   if (newPhase === 'regular' && newSub === 14) {
     const skipRow = new ActionRowBuilder().addComponents(
@@ -2843,7 +2845,7 @@ async function handleAdvance(interaction) {
         newPhase = PHASE_CYCLE[confIdx].key;
         newSub   = 0;
       }
-      // else continue to Week 15 as normal
+      // else continue to Week 14 as normal
     } catch {
       await interaction.editReply({ content: '⏰ No response — advance cancelled. Run `/advance` again.', components: [] });
       return;
@@ -4133,7 +4135,7 @@ client.on(Events.GuildMemberRemove, async (member) => {
     const embed = new EmbedBuilder()
       .setTitle('📋 Coach Resigned')
       .setColor(0xff4444)
-      .setDescription(`**${member.displayName || member.user.username}** has left the server and resigned as head coach of **${team.team_name}**.`)
+      .setDescription(`**${member.user?.username || member.id}** has left the server and resigned as head coach of **${team.team_name}**.`)
       .addFields(
         { name: 'Team',   value: team.team_name,                    inline: true },
         { name: 'Status', value: '🟢 Now Available',                inline: true },
@@ -4147,7 +4149,7 @@ client.on(Events.GuildMemberRemove, async (member) => {
   // Refresh team list
   await postTeamList(member.guild, guildId, config).catch(() => {});
 
-  console.log(`[leave] ${member.user.username} left ${member.guild.name} — unassigned from ${team.team_name}`);
+  console.log(`[leave] ${member.user?.username || member.id} left ${member.guild.name} — unassigned from ${team.team_name}`);
 });
 
 // =====================================================
