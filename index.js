@@ -719,6 +719,10 @@ function buildCommands() {
       .setName('offers-config')
       .setDescription('[Admin] Configure job offer conference rules and weighting.'),
 
+    new SlashCommandBuilder()
+      .setName('rollback-advance')
+      .setDescription('[Admin] Roll the league back to a previous season, phase, and week.'),
+
   ].map(cmd => cmd.toJSON());
 }
 
@@ -3113,6 +3117,272 @@ async function showConferenceToggleMenu(interaction, guildId, config, mode) {
   }
 }
 
+// /rollback-advance ───────────────────────────────────────────────────────
+async function handleRollbackAdvance(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+  const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
+
+  const meta = await getMeta(guildId);
+
+  // ── Open DM ───────────────────────────────────────────────────────────────
+  let dm;
+  try {
+    dm = await interaction.user.createDM();
+  } catch {
+    return interaction.editReply({ content: '❌ **Could not open a DM.** Please allow DMs from server members and try again.' });
+  }
+
+  await interaction.editReply({ content: '📬 Check your DMs — rollback wizard is starting!' });
+
+  const ask = async (prompt) => {
+    await dm.send(prompt);
+    try {
+      const collected = await dm.awaitMessages({ filter: m => m.author.id === interaction.user.id, max: 1, time: 120000, errors: ['time'] });
+      return collected.first().content.trim();
+    } catch { return null; }
+  };
+
+  const askButtons = async (prompt, buttons) => {
+    const row = new ActionRowBuilder().addComponents(
+      buttons.map(b => new ButtonBuilder().setCustomId(b.id).setLabel(b.label).setStyle(b.style || ButtonStyle.Secondary))
+    );
+    const msg = await dm.send({ content: prompt, components: [row] });
+    try {
+      const btn = await msg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
+      await btn.update({ components: [] });
+      return btn.customId;
+    } catch {
+      await msg.edit({ components: [] });
+      return null;
+    }
+  };
+
+  // ── Step 1: Target season ─────────────────────────────────────────────────
+  await dm.send(
+    `↩️ **Rollback Advance Wizard**
+
+` +
+    `Current state: **Season ${meta.season}** · **${formatPhase(meta.current_phase, meta.current_sub_phase)}**
+
+` +
+    `This will roll the league back to a previous point. Game results after that point can optionally be deleted and records recalculated.
+
+` +
+    `⚠️ **This cannot be undone.** Proceed carefully.`
+  );
+
+  const seasonStr = await ask('**[Step 1/4]** What season should the league roll back to?
+Example: `3`');
+  if (!seasonStr) return dm.send('⏰ Timed out — rollback cancelled.');
+  const targetSeason = parseInt(seasonStr);
+  if (isNaN(targetSeason) || targetSeason < 1) return dm.send('❌ Invalid season. Rollback cancelled.');
+
+  // ── Step 2: Target phase ──────────────────────────────────────────────────
+  const phaseChoice = await askButtons(
+    '**[Step 2/4]** What phase should the league roll back to?',
+    [
+      { id: 'preseason',  label: 'Preseason' },
+      { id: 'regular',    label: 'Regular Season', style: ButtonStyle.Primary },
+      { id: 'conf_champ', label: 'Conference Championship' },
+      { id: 'bowl',       label: 'Bowl Season' },
+      { id: 'offseason',  label: 'Offseason' },
+    ]
+  );
+  if (!phaseChoice) return dm.send('⏰ Timed out — rollback cancelled.');
+
+  let targetPhase = phaseChoice;
+  let targetSub   = 0;
+
+  if (phaseChoice === 'regular') {
+    const weekStr = await ask('**[Step 3/4]** What week of the regular season? (0–14)
+Example: `8`');
+    if (!weekStr) return dm.send('⏰ Timed out — rollback cancelled.');
+    const parsed = parseInt(weekStr);
+    if (isNaN(parsed) || parsed < 0 || parsed > 14) return dm.send('❌ Invalid week (0–14). Rollback cancelled.');
+    targetSub = parsed;
+  } else if (phaseChoice === 'bowl') {
+    const bowlChoice = await askButtons('**[Step 3/4]** Which bowl week?', [
+      { id: '0', label: 'Bowl Week 1' },
+      { id: '1', label: 'Bowl Week 2' },
+      { id: '2', label: 'Semifinals' },
+      { id: '3', label: 'National Championship', style: ButtonStyle.Primary },
+    ]);
+    if (!bowlChoice) return dm.send('⏰ Timed out — rollback cancelled.');
+    targetSub = parseInt(bowlChoice);
+  } else if (phaseChoice === 'offseason') {
+    const offChoice = await askButtons('**[Step 3/4]** Which offseason phase?', [
+      { id: 'players_leaving',  label: 'Players Leaving' },
+      { id: 'transfer_portal',  label: 'Transfer Portal' },
+      { id: 'position_changes', label: 'Position Changes' },
+      { id: 'training_results', label: 'Training Results' },
+    ]);
+    if (!offChoice) return dm.send('⏰ Timed out — rollback cancelled.');
+    targetPhase = offChoice;
+    if (offChoice === 'transfer_portal') {
+      const twChoice = await askButtons('Which transfer week?', [
+        { id: '0', label: 'Transfer Week 1' },
+        { id: '1', label: 'Transfer Week 2' },
+        { id: '2', label: 'Transfer Week 3' },
+        { id: '3', label: 'Transfer Week 4' },
+      ]);
+      if (!twChoice) return dm.send('⏰ Timed out — rollback cancelled.');
+      targetSub = parseInt(twChoice);
+    }
+  } else {
+    // preseason / conf_champ — no sub needed, already 0
+    await dm.send('**[Step 3/4]** *(No sub-phase needed for this phase — skipping.)*');
+  }
+
+  const targetWeek  = targetPhase === 'regular' ? targetSub + 1 : targetPhase === 'preseason' ? 1 : 17;
+  const targetLabel = formatPhase(targetPhase, targetSub);
+
+  // ── Step 4: Delete results? ───────────────────────────────────────────────
+  const deleteChoice = await askButtons(
+    `**[Step 4/4]** Do you want to delete game results submitted after **Season ${targetSeason} · ${targetLabel}**?
+
+` +
+    `• **Yes — Delete & Recalculate**: Removes results from later weeks and recomputes W/L records
+` +
+    `• **No — Keep Results**: Only rolls the phase/week back, leaves all results intact`,
+    [
+      { id: 'delete',  label: '🗑️ Yes — Delete & Recalculate', style: ButtonStyle.Danger },
+      { id: 'keep',    label: '✅ No — Keep Results',           style: ButtonStyle.Success },
+    ]
+  );
+  if (!deleteChoice) return dm.send('⏰ Timed out — rollback cancelled.');
+
+  // ── Confirm ───────────────────────────────────────────────────────────────
+  const confirm = await askButtons(
+    `⚠️ **Confirm Rollback**
+
+` +
+    `Season: **${targetSeason}**
+` +
+    `Phase: **${targetLabel}**
+` +
+    `Results: **${deleteChoice === 'delete' ? 'Delete results after this point & recalculate records' : 'Keep all results'}**
+
+` +
+    `Are you sure? This cannot be undone.`,
+    [
+      { id: 'confirm', label: '✅ Confirm Rollback', style: ButtonStyle.Danger },
+      { id: 'cancel',  label: '❌ Cancel',           style: ButtonStyle.Secondary },
+    ]
+  );
+  if (!confirm || confirm === 'cancel') return dm.send('↩️ Rollback cancelled.');
+
+  // ── Execute ───────────────────────────────────────────────────────────────
+  await dm.send('⏳ Processing rollback...');
+
+  // 1. Roll meta back
+  await setMeta(guildId, {
+    season:            targetSeason,
+    week:              targetWeek,
+    current_phase:     targetPhase,
+    current_sub_phase: targetSub,
+    advance_deadline:  null,
+    last_advance_at:   null,
+    next_advance_deadline: null,
+  });
+
+  let resultsSummary = 'Results left intact.';
+
+  if (deleteChoice === 'delete') {
+    // 2. Find results after the target week in the target season, plus all future seasons
+    const { data: toDelete } = await supabase
+      .from('results')
+      .select('id, team1_id, team2_id, score1, score2, season, week')
+      .eq('guild_id', guildId)
+      .or(`season.gt.${targetSeason},and(season.eq.${targetSeason},week.gt.${targetWeek})`);
+
+    if (toDelete && toDelete.length > 0) {
+      // Delete the results rows
+      await supabase.from('results').delete().eq('guild_id', guildId)
+        .or(`season.gt.${targetSeason},and(season.eq.${targetSeason},week.gt.${targetWeek})`);
+
+      // 3. Recompute records for affected seasons
+      const affectedSeasons = [...new Set(toDelete.map(r => r.season))];
+
+      for (const season of affectedSeasons) {
+        // Clear existing records for this season
+        await supabase.from('records').delete().eq('guild_id', guildId).eq('season', season);
+
+        // Re-fetch all remaining results for this season
+        const { data: remaining } = await supabase
+          .from('results')
+          .select('team1_id, team2_id, score1, score2')
+          .eq('guild_id', guildId)
+          .eq('season', season);
+
+        if (!remaining || remaining.length === 0) continue;
+
+        // Recompute from scratch
+        const tallies = {};
+        const ensure  = (id) => { if (!tallies[id]) tallies[id] = { wins: 0, losses: 0, ties: 0 }; };
+
+        for (const r of remaining) {
+          ensure(r.team1_id);
+          ensure(r.team2_id);
+          if (r.score1 > r.score2)      { tallies[r.team1_id].wins++;   tallies[r.team2_id].losses++; }
+          else if (r.score2 > r.score1) { tallies[r.team2_id].wins++;   tallies[r.team1_id].losses++; }
+          else                          { tallies[r.team1_id].ties++;    tallies[r.team2_id].ties++; }
+        }
+
+        // Get assignments to only write assigned teams
+        const { data: assignments } = await supabase
+          .from('team_assignments').select('team_id').eq('guild_id', guildId);
+        const assignedIds = new Set((assignments || []).map(a => a.team_id));
+
+        for (const [teamId, rec] of Object.entries(tallies)) {
+          if (!assignedIds.has(teamId)) continue;
+          await supabase.from('records').upsert({
+            guild_id: guildId, season, team_id: teamId,
+            wins: rec.wins, losses: rec.losses, ties: rec.ties,
+          }, { onConflict: 'team_id,season,guild_id' });
+        }
+      }
+
+      resultsSummary = `Deleted **${toDelete.length}** result(s) and recalculated records for season(s): ${affectedSeasons.join(', ')}.`;
+    } else {
+      resultsSummary = 'No results found after the target point — nothing to delete.';
+    }
+  }
+
+  // ── Done ──────────────────────────────────────────────────────────────────
+  await dm.send(
+    `✅ **Rollback Complete**
+
+` +
+    `**Season:** ${targetSeason}
+` +
+    `**Phase:** ${targetLabel}
+` +
+    `**Results:** ${resultsSummary}
+
+` +
+    `Use \`/advance\` to continue from this point.`
+  );
+
+  // Post to advance tracker
+  const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
+  if (advanceChannel) {
+    const embed = new EmbedBuilder()
+      .setTitle('↩️ Advance Rolled Back')
+      .setColor(0xff9900)
+      .setDescription(`The league has been rolled back by an admin.`)
+      .addFields(
+        { name: 'Season', value: `Season ${targetSeason}`, inline: true },
+        { name: 'Phase',  value: targetLabel,               inline: true },
+        { name: 'Results', value: resultsSummary,           inline: false },
+      )
+      .setTimestamp();
+    await advanceChannel.send({ embeds: [embed] }).catch(() => {});
+  }
+}
+
 // /reload-commands ───────────────────────────────────────────────────
 async function handleReloadCommands(interaction) {
   await interaction.deferReply({ flags: 64 });
@@ -3352,6 +3622,13 @@ async function handleHelp(interaction) {
       title:     '📅 `/set-phase`',
       usage:     '/set-phase season: <n> phase: <phase> sub: <n>',
       desc:      "Manually set the current season, phase, and sub-week. Use to correct the league state if it gets out of sync. /advance will continue from wherever you set it.",
+    },
+    {
+      flag:      null,
+      adminOnly: true,
+      title:     '↩️ `/rollback-advance`',
+      usage:     '/rollback-advance',
+      desc:      "Roll the league back to a previous season and week via DM. Optionally delete game results submitted after that point and recalculate records.",
     },
   ];
 
@@ -3711,6 +3988,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'advance':           return handleAdvance(interaction);
         case 'set-phase':          return handleSetPhase(interaction);
         case 'reload-commands':    return handleReloadCommands(interaction);
+        case 'rollback-advance':   return handleRollbackAdvance(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
         case 'streamer':          return handleStreaming(interaction);
         case 'config':
