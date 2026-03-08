@@ -3174,8 +3174,7 @@ async function handleRollbackAdvance(interaction) {
     `⚠️ **This cannot be undone.** Proceed carefully.`
   );
 
-  const seasonStr = await ask('**[Step 1/4]** What season should the league roll back to?
-Example: `3`');
+  const seasonStr = await ask(`**[Step 1/4]** What season should the league roll back to?\nExample: 3`);
   if (!seasonStr) return dm.send('⏰ Timed out — rollback cancelled.');
   const targetSeason = parseInt(seasonStr);
   if (isNaN(targetSeason) || targetSeason < 1) return dm.send('❌ Invalid season. Rollback cancelled.');
@@ -3197,8 +3196,7 @@ Example: `3`');
   let targetSub   = 0;
 
   if (phaseChoice === 'regular') {
-    const weekStr = await ask('**[Step 3/4]** What week of the regular season? (0–14)
-Example: `8`');
+    const weekStr = await ask(`**[Step 3/4]** What week of the regular season? (0–14)\nExample: 8`);
     if (!weekStr) return dm.send('⏰ Timed out — rollback cancelled.');
     const parsed = parseInt(weekStr);
     if (isNaN(parsed) || parsed < 0 || parsed > 14) return dm.send('❌ Invalid week (0–14). Rollback cancelled.');
