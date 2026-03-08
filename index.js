@@ -2699,7 +2699,7 @@ async function postTeamList(guild, guildId, config) {
 }
 
 // /advance helpers ────────────────────────────────────
-async function postWeeklyRecap(guild, guildId, config, meta) {
+async function postWeeklyRecap(guild, guildId, config, meta, nextPhase = null, nextSub = null) {
   const newsChannel = findTextChannel(guild, config.channel_news_feed);
   if (!newsChannel) return;
 
@@ -2713,11 +2713,28 @@ async function postWeeklyRecap(guild, guildId, config, meta) {
 
   if (!results || results.length === 0) return;
 
+  // Use nextPhase/nextSub (the phase being advanced TO) to detect national championship
+  const isNatChamp = nextPhase === 'bowl' && nextSub === 3;
+
   const lines = results.map(r => {
-    const t1     = r.team1?.team_name || 'Team 1';
-    const t2     = r.team2?.team_name || 'Team 2';
-    const trophy = r.score1 !== r.score2 ? '🏆' : '🤝';
-    return `${trophy} **${t1}** ${r.score1} — ${r.score2} **${t2}**`;
+    const t1   = r.team1?.team_name || 'Team 1';
+    const t2   = r.team2?.team_name || 'Team 2';
+    const tied = r.score1 === r.score2;
+
+    let t1Display, t2Display;
+    if (tied) {
+      t1Display = `**${t1}**`;
+      t2Display = `**${t2}**`;
+    } else if (r.score1 > r.score2) {
+      t1Display = `**${t1}**`;
+      t2Display = t2;
+    } else {
+      t1Display = t1;
+      t2Display = `**${t2}**`;
+    }
+
+    const prefix = isNatChamp ? '🏆 ' : '';
+    return `${prefix}${t1Display} ${r.score1} — ${r.score2} ${t2Display}`;
   });
 
   const embed = new EmbedBuilder()
@@ -2877,7 +2894,7 @@ async function handleAdvance(interaction) {
     const recapNewsChannel    = findTextChannel(interaction.guild, config.channel_news_feed);
     const recapAdvanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
     const sameChannel = recapNewsChannel && recapAdvanceChannel && recapNewsChannel.id === recapAdvanceChannel.id;
-    if (!sameChannel) await postWeeklyRecap(interaction.guild, guildId, config, meta);
+    if (!sameChannel) await postWeeklyRecap(interaction.guild, guildId, config, meta, newPhase, newSub);
   }
 
   await setMeta(guildId, {
@@ -3061,7 +3078,7 @@ async function showConferenceToggleMenu(interaction, guildId, config, mode) {
   }
 
   // Build toggle buttons — up to 25 (5 rows of 5)
-  const buttons = conferences.slice(0, 25).map(conf =>
+  const buttons = conferences.slice(0, 20).map(conf =>
     new ButtonBuilder()
       .setCustomId(`ofc_conf_${mode}_${conf}`)
       .setLabel(active.includes(conf) ? `✅ ${conf}` : conf)
@@ -3290,16 +3307,26 @@ async function handleRollbackAdvance(interaction) {
 
   if (deleteChoice === 'delete') {
     // 2. Find results after the target week in the target season, plus all future seasons
-    const { data: toDelete } = await supabase
+    // Fetch results to delete in two queries (Supabase JS v2 doesn't support nested and() inside or())
+    const { data: laterSeasons } = await supabase
       .from('results')
       .select('id, team1_id, team2_id, score1, score2, season, week')
       .eq('guild_id', guildId)
-      .or(`season.gt.${targetSeason},and(season.eq.${targetSeason},week.gt.${targetWeek})`);
+      .gt('season', targetSeason);
 
-    if (toDelete && toDelete.length > 0) {
-      // Delete the results rows
-      await supabase.from('results').delete().eq('guild_id', guildId)
-        .or(`season.gt.${targetSeason},and(season.eq.${targetSeason},week.gt.${targetWeek})`);
+    const { data: sameSeasonLaterWeeks } = await supabase
+      .from('results')
+      .select('id, team1_id, team2_id, score1, score2, season, week')
+      .eq('guild_id', guildId)
+      .eq('season', targetSeason)
+      .gt('week', targetWeek);
+
+    const toDelete = [...(laterSeasons || []), ...(sameSeasonLaterWeeks || [])];
+
+    if (toDelete.length > 0) {
+      // Delete in two passes matching the same conditions
+      await supabase.from('results').delete().eq('guild_id', guildId).gt('season', targetSeason);
+      await supabase.from('results').delete().eq('guild_id', guildId).eq('season', targetSeason).gt('week', targetWeek);
 
       // 3. Recompute records for affected seasons
       const affectedSeasons = [...new Set(toDelete.map(r => r.season))];
