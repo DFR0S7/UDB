@@ -746,6 +746,16 @@ async function registerCommands() {
 // =====================================================
 
 // Setup gate — returned to user-facing handlers when setup hasn't been run
+// Safe defer — returns false if interaction token already expired (e.g. after shard reconnect)
+async function safeDeferReply(interaction, ephemeral = true) {
+  try {
+    await interaction.deferReply({ flags: ephemeral ? 64 : 0 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function replySetupRequired(interaction) {
   const msg = {
     content:
@@ -2758,7 +2768,12 @@ async function postWeeklyRecap(guild, guildId, config, meta, nextPhase = null, n
 
 // /advance ────────────────────────────────────────────
 async function handleAdvance(interaction) {
-  await interaction.deferReply({ flags: 64 });
+  try {
+    await interaction.deferReply({ flags: 64 });
+  } catch {
+    // Interaction token expired (e.g. after shard reconnect) — silently drop
+    return;
+  }
   const guildId = interaction.guildId;
   guildConfigs.delete(guildId);
   const config = await loadGuildConfig(guildId);
@@ -3892,12 +3907,16 @@ async function handleAutocomplete(interaction) {
 
   } else if (commandName === 'advance') {
     // Always load fresh config so intervals reflect latest settings
-    guildConfigs.delete(guildId);
-    const advConfig  = await loadGuildConfig(guildId);
-    const intervals  = advConfig.advance_intervals_parsed || [24, 48];
-    choices = intervals
-      .filter(h => String(h).includes(query))
-      .map(h => ({ name: `${h} Hours`, value: String(h) }));
+    try {
+      guildConfigs.delete(guildId);
+      const advConfig  = await loadGuildConfig(guildId);
+      const intervals  = advConfig.advance_intervals_parsed || [24, 48];
+      choices = intervals
+        .filter(h => String(h).includes(query))
+        .map(h => ({ name: `${h} Hours`, value: String(h) }));
+    } catch {
+      choices = [24, 48].map(h => ({ name: `${h} Hours`, value: String(h) }));
+    }
 
   } else if (commandName === 'config' && focused.name === 'setting') {
     const allSettings = [
