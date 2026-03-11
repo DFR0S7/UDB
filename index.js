@@ -751,7 +751,8 @@ async function safeDeferReply(interaction, ephemeral = true) {
   try {
     await interaction.deferReply({ flags: ephemeral ? 64 : 0 });
     return true;
-  } catch {
+  } catch (err) {
+    if (err.code !== 10062) console.error('[safeDeferReply] unexpected error:', err.message);
     return false;
   }
 }
@@ -2770,8 +2771,9 @@ async function postWeeklyRecap(guild, guildId, config, meta, nextPhase = null, n
 async function handleAdvance(interaction) {
   try {
     await interaction.deferReply({ flags: 64 });
-  } catch {
-    // Interaction token expired (e.g. after shard reconnect) — silently drop
+  } catch (err) {
+    if (err.code === 10062) return; // Interaction token expired — silently drop
+    console.error('[advance] deferReply failed:', err.message);
     return;
   }
   const guildId = interaction.guildId;
