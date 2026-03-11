@@ -4272,6 +4272,12 @@ client.once(Events.ClientReady, async (c) => {
 // =====================================================
 // LOGIN
 // =====================================================
+// Quick connectivity check before attempting login
+fetch('https://discord.com/api/v10/gateway').then(r => {
+  console.log(`[bot] Discord gateway reachable — HTTP ${r.status}`);
+}).catch(err => {
+  console.error('[bot] Cannot reach Discord gateway:', err.message);
+});
 console.log('[bot] Attempting Discord login...');
 const loginTimeout = setTimeout(() => {
   console.error('[bot] Login timed out after 30s — DISCORD_TOKEN may be invalid or Discord gateway unreachable. Exiting...');
