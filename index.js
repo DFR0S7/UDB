@@ -4272,9 +4272,17 @@ client.once(Events.ClientReady, async (c) => {
 // =====================================================
 // LOGIN
 // =====================================================
+console.log('[bot] Attempting Discord login...');
+const loginTimeout = setTimeout(() => {
+  console.error('[bot] Login timed out after 30s — DISCORD_TOKEN may be invalid or Discord gateway unreachable. Exiting...');
+  process.exit(1);
+}, 30000);
+
 client.login(DISCORD_TOKEN).then(() => {
+  clearTimeout(loginTimeout);
   console.log('[bot] Login successful — awaiting ready event...');
 }).catch(err => {
+  clearTimeout(loginTimeout);
   console.error('[bot] Login failed:', err.message);
   process.exit(1);
 });
