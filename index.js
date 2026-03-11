@@ -4257,9 +4257,24 @@ client.once(Events.ClientReady, async (c) => {
 
   expireJobOffers();
   setInterval(expireJobOffers, 30 * 60 * 1000);
+
+  // ── Shard watchdog ────────────────────────────────────────────────────
+  // If the WebSocket ping goes stale (shard zombie), force-exit so Render restarts cleanly.
+  setInterval(() => {
+    const ping = client.ws.ping;
+    if (ping === -1) {
+      console.error('[watchdog] WebSocket ping is -1 — shard appears dead. Forcing restart...');
+      process.exit(1);
+    }
+  }, 60 * 1000); // check every 60 seconds
 });
 
 // =====================================================
 // LOGIN
 // =====================================================
-client.login(DISCORD_TOKEN);
+client.login(DISCORD_TOKEN).then(() => {
+  console.log('[bot] Login successful — awaiting ready event...');
+}).catch(err => {
+  console.error('[bot] Login failed:', err.message);
+  process.exit(1);
+});
