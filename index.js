@@ -3232,11 +3232,11 @@ async function handleRollbackAdvance(interaction) {
   let targetSub   = 0;
 
   if (phaseChoice === 'regular') {
-    const weekStr = await ask(`**[Step 3/4]** What week of the regular season? (0–14)\nExample: 8`);
+    const weekStr = await ask(`**[Step 3/4]** What week of the regular season? (1–15)\nExample: 8`);
     if (!weekStr) return dm.send('⏰ Timed out — rollback cancelled.');
     const parsed = parseInt(weekStr);
-    if (isNaN(parsed) || parsed < 0 || parsed > 14) return dm.send('❌ Invalid week (0–14). Rollback cancelled.');
-    targetSub = parsed;
+    if (isNaN(parsed) || parsed < 1 || parsed > 15) return dm.send('❌ Invalid week (1–15). Rollback cancelled.');
+    targetSub = parsed - 1; // sub is 0-indexed; Week 1 = sub 0, Week 8 = sub 7, etc.
   } else if (phaseChoice === 'bowl') {
     const bowlChoice = await askButtons('**[Step 3/4]** Which bowl week?', [
       { id: '0', label: 'Bowl Week 1' },
