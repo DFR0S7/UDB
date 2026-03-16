@@ -2171,7 +2171,7 @@ async function expireJobOffers() {
 
 // /game-result ────────────────────────────────────────
 async function handleGameResult(interaction) {
-  await interaction.deferReply();
+  await interaction.deferReply({ flags: 64 });
   const guildId      = interaction.guildId;
   const config       = await getConfig(guildId);
   if (!config.setup_complete) return replySetupRequired(interaction);
@@ -2242,10 +2242,11 @@ async function handleGameResult(interaction) {
 
   if (summary) embed.addFields({ name: '📝 Game Summary', value: summary, inline: false });
 
-  await interaction.editReply({ embeds: [embed] });
+  await interaction.editReply({ content: '✅ Result submitted!' });
+  setTimeout(() => interaction.deleteReply().catch(() => {}), 8000);
 
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
-  if (newsChannel && newsChannel.id !== interaction.channelId) {
+  if (newsChannel) {
     await newsChannel.send({ embeds: [embed] });
   }
 
@@ -2261,7 +2262,7 @@ async function handleGameResult(interaction) {
 
 // /any-game-result ────────────────────────────────────
 async function handleAnyGameResult(interaction) {
-  await interaction.deferReply();
+  await interaction.deferReply({ flags: 64 });
   const guildId   = interaction.guildId;
   const config    = await getConfig(guildId);
   if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
@@ -2321,10 +2322,11 @@ async function handleAnyGameResult(interaction) {
     )
     .setFooter({ text: `Entered by ${interaction.user.displayName} (admin)${weekInput && weekInput !== meta.week ? ` · Backfilled to Week ${week}` : ''}` });
 
-  await interaction.editReply({ embeds: [embed] });
+  await interaction.editReply({ content: '✅ Result entered!' });
+  setTimeout(() => interaction.deleteReply().catch(() => {}), 8000);
 
   const newsChannel = findTextChannel(interaction.guild, config.channel_news_feed);
-  if (newsChannel && newsChannel.id !== interaction.channelId) {
+  if (newsChannel) {
     await newsChannel.send({ embeds: [embed] });
   }
 }
