@@ -2228,7 +2228,7 @@ async function handleGameResult(interaction) {
   const color  = tied ? 0xffa500 : (won ? config.embed_color_win_int : config.embed_color_loss_int);
 
   const embed = new EmbedBuilder()
-    .setTitle(`🏈 Game Result — Season ${meta.season} Week ${meta.week}`)
+    .setTitle(`🏈 Game Result — Season ${meta.season} ${formatPhase(meta.current_phase, meta.current_sub_phase)}`)
     .setColor(color)
     .setDescription(`**${yourTeam.team_name}** vs **${oppTeam.team_name}**`)
     .addFields(
@@ -2311,7 +2311,7 @@ async function handleAnyGameResult(interaction) {
   const color = tied ? 0xffa500 : (won1 ? config.embed_color_win_int : config.embed_color_loss_int);
 
   const embed = new EmbedBuilder()
-    .setTitle(`🏈 Game Result Entered — S${meta.season} W${week}`)
+    .setTitle(`🏈 Game Result Entered — S${meta.season} ${formatPhase(meta.current_phase, meta.current_sub_phase)}`)
     .setColor(color)
     .addFields(
       { name: team1.team_name,              value: `${score1}`,                          inline: true },
@@ -4128,6 +4128,58 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
+
+// =====================================================
+// MESSAGE UPDATE — Catch Wamellow embed population
+// =====================================================
+// Discord delivers Wamellow's stream posts with empty embeds on MessageCreate,
+// then fires MessageUpdate when the embed is populated. We handle both events
+// with the same logic to ensure the reminder always triggers.
+client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
+  // Only care if embeds were added (Wamellow embed population)
+  if (!newMessage.guildId) return;
+  if (!newMessage.author?.bot) return;
+  const isWamellow = newMessage.author.username.toLowerCase().includes('wamellow');
+  if (!isWamellow) return;
+
+  // Only process if new message has embeds and old didn't (avoid duplicate triggers)
+  if ((oldMessage.embeds?.length || 0) > 0) return;
+  if (!newMessage.embeds?.length) return;
+
+  const config = await getConfig(newMessage.guildId).catch(() => null);
+  if (!config?.setup_complete) return;
+  if (!config?.feature_game_results_reminder) return;
+  if (newMessage.channel.name?.toLowerCase() !== config.channel_streaming?.toLowerCase()) return;
+
+  const streamRegex = /https?:\/\/(?:www\.)?(?:twitch\.tv|youtube\.com\/(?:live\/|channel\/|@)?|youtu\.be\/)([^\s<>"'\/]+)/i;
+
+  let rawUrl = null;
+  for (const embed of newMessage.embeds) {
+    const searchTargets = [
+      embed.url,
+      embed.description,
+      embed.title,
+      ...(embed.fields || []).map(f => f.value),
+    ].filter(Boolean).join(' ');
+    const embedMatch = searchTargets.match(streamRegex);
+    if (embedMatch) { rawUrl = embedMatch[0]; break; }
+  }
+
+  if (!rawUrl) return;
+
+  const handleMatch = rawUrl.match(streamRegex);
+  if (!handleMatch) return;
+  const handle  = handleMatch[1].replace(/[?#].*$/, '').trim();
+  const minutes = config.stream_reminder_minutes || 45;
+
+  const streamer = await getStreamerByHandle(newMessage.guildId, handle).catch(() => null);
+  if (!streamer) {
+    console.warn(`[stream] MessageUpdate — Wamellow handle "${handle}" not found in coach_streams`);
+    return;
+  }
+  console.log(`[stream] MessageUpdate matched handle "${handle}" → user ${streamer.user_id}`);
+  scheduleStreamReminder(newMessage.channel, streamer.user_id, newMessage.guildId, minutes);
+});
 
 // =====================================================
 // MEMBER LEAVE — Auto-resign coach
