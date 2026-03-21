@@ -2834,40 +2834,47 @@ async function handleAdvance(interaction) {
     }
   }
 
-  // ── Week 15 skip prompt ───────────────────────────────────────────────────
-  // Fires when the league is currently on Week 14 (sub 14) and about to roll over.
-  // Some leagues skip Week 15 entirely and go straight to Conference Championship.
-  if (currentPhase === 'regular' && currentSub === 14) {
-    const skipRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId('advance_week15')
-        .setLabel('▶️ Continue to Week 15')
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId('advance_skip15')
-        .setLabel('⏭️ Skip to Conference Championship')
-        .setStyle(ButtonStyle.Primary),
-    );
-    const promptMsg = await interaction.editReply({
-      content: '**Week 15 Prompt**\nSome leagues skip Week 15. What would you like to do?',
-      components: [skipRow],
-    });
-    try {
-      const btn = await promptMsg.awaitMessageComponent({
-        filter: i => i.user.id === interaction.user.id,
-        time: 60000,
+  // ── Week 14 / Week 15 skip prompts ──────────────────────────────────────
+  // Fires independently at Week 14 and Week 15 — leagues may skip either or both
+  // depending on their schedule. Each advance gets its own prompt.
+  const skipWeekPrompts = [
+    { triggerSub: 13, weekLabel: 'Week 14', continueId: 'advance_continue14', skipId: 'advance_skip14' },
+    { triggerSub: 14, weekLabel: 'Week 15', continueId: 'advance_continue15', skipId: 'advance_skip15' },
+  ];
+
+  for (const { triggerSub, weekLabel, continueId, skipId } of skipWeekPrompts) {
+    if (currentPhase === 'regular' && currentSub === triggerSub) {
+      const skipRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(continueId)
+          .setLabel(`▶️ Continue to ${weekLabel}`)
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(skipId)
+          .setLabel('⏭️ Skip to Conference Championship')
+          .setStyle(ButtonStyle.Primary),
+      );
+      const promptMsg = await interaction.editReply({
+        content: `**${weekLabel} Prompt**\nDoes your league play ${weekLabel}?`,
+        components: [skipRow],
       });
-      await btn.update({ components: [] });
-      if (btn.customId === 'advance_skip15') {
-        // Jump straight to Conference Championship
-        const confIdx = PHASE_CYCLE.findIndex(p => p.key === 'conf_champ');
-        newPhase = PHASE_CYCLE[confIdx].key;
-        newSub   = 0;
+      try {
+        const btn = await promptMsg.awaitMessageComponent({
+          filter: i => i.user.id === interaction.user.id,
+          time: 60000,
+        });
+        await btn.update({ components: [] });
+        if (btn.customId === skipId) {
+          const confIdx = PHASE_CYCLE.findIndex(p => p.key === 'conf_champ');
+          newPhase = PHASE_CYCLE[confIdx].key;
+          newSub   = 0;
+        }
+        // else continue to the week as normal
+      } catch {
+        await interaction.editReply({ content: '⏰ No response — advance cancelled. Run `/advance` again.', components: [] });
+        return;
       }
-      // else continue to Week 15 as normal
-    } catch {
-      await interaction.editReply({ content: '⏰ No response — advance cancelled. Run `/advance` again.', components: [] });
-      return;
+      break; // Only one prompt per advance — next advance will trigger the next prompt if applicable
     }
   }
 
