@@ -2834,6 +2834,42 @@ async function handleAdvance(interaction) {
     }
   }
 
+  // ── Training Results skip prompt ─────────────────────────────────────────
+  // Fires when advancing from Position Changes to Training Results.
+  // Some leagues skip Training Results and go straight to Encourage Transfers.
+  if (currentPhase === 'position_changes') {
+    const skipRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('advance_continue_training')
+        .setLabel('▶️ Continue to Training Results')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('advance_skip_training')
+        .setLabel('⏭️ Skip to Encourage Transfers')
+        .setStyle(ButtonStyle.Primary),
+    );
+    const promptMsg = await interaction.editReply({
+      content: '**Training Results Prompt**\nDoes your league use Training Results?',
+      components: [skipRow],
+    });
+    try {
+      const btn = await promptMsg.awaitMessageComponent({
+        filter: i => i.user.id === interaction.user.id,
+        time: 60000,
+      });
+      await btn.update({ components: [] });
+      if (btn.customId === 'advance_skip_training') {
+        const etIdx = PHASE_CYCLE.findIndex(p => p.key === 'encourage_transfers');
+        newPhase = PHASE_CYCLE[etIdx].key;
+        newSub   = 0;
+      }
+      // else continue to Training Results as normal
+    } catch {
+      await interaction.editReply({ content: '⏰ No response — advance cancelled. Run `/advance` again.', components: [] });
+      return;
+    }
+  }
+
   // ── Week 14 / Week 15 skip prompts ──────────────────────────────────────
   // Fires independently at Week 14 and Week 15 — leagues may skip either or both
   // depending on their schedule. Each advance gets its own prompt.
