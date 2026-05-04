@@ -295,13 +295,14 @@ async function postToChannel(guild, channelName, payload) {
 // =====================================================
 // SUPABASE HELPERS
 // =====================================================
-async function getTeamByUser(userId, guildId) {
-  const { data, error } = await supabase
+async function getTeamByUser(userId, guildId, leagueId = null) {
+  let query = supabase
     .from('team_assignments')
     .select('*, teams(*)')
     .eq('user_id', userId)
-    .eq('guild_id', guildId)
-    .maybeSingle();
+    .eq('guild_id', guildId);
+  if (leagueId) query = query.eq('league_id', leagueId);
+  const { data, error } = await query.maybeSingle();
 
   if (error) {
     console.error(`[db] getTeamByUser(${userId}, ${guildId}) error:`, error.message);
@@ -315,7 +316,7 @@ async function getTeamByUser(userId, guildId) {
   return { ...data.teams, user_id: data.user_id, assignment_id: data.id };
 }
 
-async function getTeamByName(teamName, guildId) {
+async function getTeamByName(teamName, guildId, leagueId = null) {
   // Use maybeSingle() so Supabase returns null instead of throwing on 0 rows
   const { data: team, error: teamErr } = await supabase
     .from('teams')
@@ -329,12 +330,13 @@ async function getTeamByName(teamName, guildId) {
   }
   if (!team) return null;
 
-  const { data: assignment, error: assignErr } = await supabase
+  let assignQuery = supabase
     .from('team_assignments')
     .select('*')
     .eq('team_id', team.id)
-    .eq('guild_id', guildId)
-    .maybeSingle();
+    .eq('guild_id', guildId);
+  if (leagueId) assignQuery = assignQuery.eq('league_id', leagueId);
+  const { data: assignment, error: assignErr } = await assignQuery.maybeSingle();
 
   if (assignErr) {
     console.error(`[db] getTeamByName("${teamName}") assignments query error:`, assignErr.message);
@@ -344,7 +346,7 @@ async function getTeamByName(teamName, guildId) {
   return { ...team, user_id: assignment?.user_id || null, assignment_id: assignment?.id || null };
 }
 
-async function getAllTeams(guildId) {
+async function getAllTeams(guildId, leagueId = null) {
   const { data: teams, error: teamsErr } = await supabase
     .from('teams')
     .select('*')
@@ -356,10 +358,12 @@ async function getAllTeams(guildId) {
   }
   if (!teams || teams.length === 0) return [];
 
-  const { data: assignments, error: assignErr } = await supabase
+  let assignmentsQuery = supabase
     .from('team_assignments')
     .select('*')
     .eq('guild_id', guildId);
+  if (leagueId) assignmentsQuery = assignmentsQuery.eq('league_id', leagueId);
+  const { data: assignments, error: assignErr } = await assignmentsQuery;
 
   if (assignErr) {
     console.error(`[db] getAllTeams(${guildId}) assignments query error:`, assignErr.message);
@@ -376,18 +380,23 @@ async function getAllTeams(guildId) {
   }));
 }
 
-async function assignTeam(teamId, userId, guildId) {
+async function assignTeam(teamId, userId, guildId, leagueId = null) {
   await supabase
     .from('team_assignments')
-    .upsert({ team_id: teamId, user_id: userId, guild_id: guildId }, { onConflict: 'team_id,guild_id' });
+    .upsert(
+      { team_id: teamId, user_id: userId, guild_id: guildId, league_id: leagueId },
+      { onConflict: 'team_id,guild_id' }
+    );
 }
 
-async function unassignTeam(teamId, guildId) {
-  await supabase
+async function unassignTeam(teamId, guildId, leagueId = null) {
+  let query = supabase
     .from('team_assignments')
     .delete()
     .eq('team_id', teamId)
     .eq('guild_id', guildId);
+  if (leagueId) query = query.eq('league_id', leagueId);
+  await query;
 }
 
 // =====================================================
@@ -1979,7 +1988,11 @@ async function handleJobOffers(interaction) {
     return interaction.editReply({ content: '❌ **Job Offers Disabled**\nThis feature is turned off. An admin can enable it with `/config features`.' });
   }
 
-  const currentTeam = await getTeamByUser(userId, guildId);
+  const league      = await getLeagueFromInteraction(interaction);
+  if (!league) return replyNoLeague(interaction);
+  const leagueId    = league.league_id;
+
+  const currentTeam = await getTeamByUser(userId, guildId, leagueId);
   if (currentTeam) {
     return interaction.editReply({
       content: `❌ **Already Assigned**\nYou are already the head coach of **${currentTeam.team_name}**. Job offers are only available to coaches without a team.\n\nIf this is a mistake, ask an admin to run \`/resetteam\` to remove your current assignment.`,
@@ -2532,10 +2545,14 @@ async function handleRankingAllTime(interaction) {
   if (!config.setup_complete) return replySetupRequired(interaction);
   if (!config.feature_ranking_all_time) return interaction.editReply({ content: '❌ All-time rankings are disabled on this server.' });
 
+  const atLeague = await getLeagueFromInteraction(interaction);
+  if (!atLeague) return replyNoLeague(interaction);
+
   const { data: records } = await supabase
     .from('records')
     .select('team_id, wins, losses, teams(team_name, team_assignments(user_id, guild_id))')
-    .eq('guild_id', interaction.guildId);
+    .eq('guild_id', interaction.guildId)
+    .eq('league_id', atLeague.league_id);
 
   // Filter to only teams assigned in THIS guild (team_assignments is cross-guild)
   const guildIdAT = interaction.guildId;
@@ -2585,13 +2602,16 @@ async function handleAssignTeam(interaction) {
   const config   = await getConfig(guildId);
   if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_assign_team) return interaction.editReply({ content: '❌ Team assignment is disabled on this server.' });
+  const league   = await getLeagueFromInteraction(interaction);
+  if (!league) return replyNoLeague(interaction);
+  const leagueId = league.league_id;
   const guild    = interaction.guild;
   const user     = interaction.options.getUser('user');
   const teamName = interaction.options.getString('team');
   const skipAnn  = interaction.options.getBoolean('skip-announcement') || false;
 
   let team;
-  try { team = await getTeamByName(teamName, guildId); }
+  try { team = await getTeamByName(teamName, guildId, leagueId); }
   catch (err) { return interaction.editReply(`❌ **Database Error**\nCouldn't look up team "${teamName}": ${err.message}`); }
   if (!team) return interaction.editReply(`❌ **Team Not Found: \`${teamName}\`**\nThis team doesn't exist in the global teams database. Make sure you selected from the autocomplete dropdown.\n\nIf the team is missing entirely, it may need to be added to the Supabase \`teams\` table.`);
 
@@ -2600,10 +2620,10 @@ async function handleAssignTeam(interaction) {
     return interaction.editReply(`❌ **Team Already Assigned**\n**${team.team_name}** is currently coached by **${currentCoach ? currentCoach.displayName : 'another coach'}** in this league.\n\nTo reassign this team, first run \`/resetteam\` on the current coach, then try \`/assign-team\` again.`);
   }
 
-  const oldTeam = await getTeamByUser(user.id, guildId);
-  if (oldTeam) await unassignTeam(oldTeam.id, guildId);
+  const oldTeam = await getTeamByUser(user.id, guildId, leagueId);
+  if (oldTeam) await unassignTeam(oldTeam.id, guildId, leagueId);
 
-  await assignTeam(team.id, user.id, guildId);
+  await assignTeam(team.id, user.id, guildId, leagueId);
 
   const member = await guild.members.fetch(user.id).catch(() => null);
   if (member) {
@@ -2645,6 +2665,9 @@ async function handleResetTeam(interaction) {
   const config  = await getConfig(guildId);
   if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_reset_team) return interaction.editReply({ content: '❌ Team reset is disabled on this server.' });
+  const league    = await getLeagueFromInteraction(interaction);
+  if (!league) return replyNoLeague(interaction);
+  const leagueId  = league.league_id;
   const user      = interaction.options.getUser('user');
   const teamInput = interaction.options.getString('team');
 
@@ -2657,17 +2680,17 @@ async function handleResetTeam(interaction) {
   if (user) {
     // Normal flow — look up by user
     targetId = user.id;
-    team = await getTeamByUser(targetId, guildId);
+    team = await getTeamByUser(targetId, guildId, leagueId);
     if (!team) return interaction.editReply({ content: `❌ **No Team Found**\n<@${targetId}> doesn't have a team assigned in this league.` });
   } else {
     // Team name flow — find the assignment directly
-    team = await getTeamByName(teamInput, guildId);
+    team = await getTeamByName(teamInput, guildId, leagueId);
     if (!team) return interaction.editReply({ content: `❌ **Team Not Found: \`${teamInput}\`**\nNo team with that name exists. Use the autocomplete dropdown.` });
     if (!team.user_id) return interaction.editReply({ content: `❌ **No Coach Assigned**\n**${team.team_name}** doesn't have a coach assigned. Nothing to reset.` });
     targetId = team.user_id;
   }
 
-  await unassignTeam(team.id, guildId);
+  await unassignTeam(team.id, guildId, leagueId);
   await removeCoachStream(guildId, targetId).catch(() => {});
 
   // Try to remove role if member is still in server
@@ -2711,10 +2734,12 @@ async function handleListTeams(interaction) {
   const config  = await getConfig(guildId);
   if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_list_teams) return interaction.editReply({ content: '❌ Team listing is disabled on this server.' });
+  const league  = await getLeagueFromInteraction(interaction);
+  if (!league) return replyNoLeague(interaction);
 
   let allTeams;
   try {
-    allTeams = await getAllTeams(guildId);
+    allTeams = await getAllTeams(guildId, league.league_id);
   } catch (err) {
     return interaction.editReply(`❌ **Database Error**\nCouldn't load teams: ${err.message}\n\nCheck your Supabase connection and ensure the \`teams\` table exists and has data.`);
   }
@@ -3143,6 +3168,9 @@ async function handleMoveCoach(interaction) {
   const config      = await getConfig(guildId);
   if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_move_coach) return interaction.editReply({ content: '❌ Move coach is disabled on this server.' });
+  const league      = await getLeagueFromInteraction(interaction);
+  if (!league) return replyNoLeague(interaction);
+  const leagueId    = league.league_id;
   const coachId     = interaction.options.getString('coach');
   const newTeamName = interaction.options.getString('new-team');
 
@@ -3150,9 +3178,9 @@ async function handleMoveCoach(interaction) {
   if (!user) return interaction.editReply('❌ **Coach Not Found**\nThis user couldn\'t be fetched from the server. They may have left.\n\nIf they\'re still in the server, try running `/move-coach` again and selecting from the autocomplete list.');
 
   let currentTeam, newTeam;
-  try { currentTeam = await getTeamByUser(user.id, guildId); }
+  try { currentTeam = await getTeamByUser(user.id, guildId, leagueId); }
   catch (err) { return interaction.editReply(`❌ **Database Error**\nCouldn't load current team for this coach: ${err.message}`); }
-  try { newTeam = await getTeamByName(newTeamName, guildId); }
+  try { newTeam = await getTeamByName(newTeamName, guildId, leagueId); }
   catch (err) { return interaction.editReply(`❌ **Database Error**\nCouldn't look up destination team "${newTeamName}": ${err.message}`); }
 
   if (!newTeam) return interaction.editReply(`❌ **Team Not Found: \`${newTeamName}\`**\nThis team doesn't exist in the database. Use the autocomplete dropdown to select a valid destination team.`);
@@ -3160,8 +3188,8 @@ async function handleMoveCoach(interaction) {
     return interaction.editReply(`❌ **Team Already Occupied**\n**${newTeam.team_name}** is currently assigned to another coach in this league.\n\nTo move this coach there, first run \`/resetteam\` on the current coach of that team, then try again.`);
   }
 
-  if (currentTeam) await unassignTeam(currentTeam.id, guildId);
-  await assignTeam(newTeam.id, user.id, guildId);
+  if (currentTeam) await unassignTeam(currentTeam.id, guildId, leagueId);
+  await assignTeam(newTeam.id, user.id, guildId, leagueId);
 
   const embed = new EmbedBuilder()
     .setTitle('🔄 Coach Moved')
@@ -3531,25 +3559,35 @@ async function handleRollbackAdvance(interaction) {
   if (deleteChoice === 'delete') {
     // 2. Find results after the target week in the target season, plus all future seasons
     // Fetch results to delete in two queries (Supabase JS v2 doesn't support nested and() inside or())
-    const { data: laterSeasons } = await supabase
+    const rbLeagueId = rollbackLeague?.league_id || null;
+
+    const laterSeasonsQ = supabase
       .from('results')
       .select('id, team1_id, team2_id, score1, score2, season, week')
       .eq('guild_id', guildId)
       .gt('season', targetSeason);
+    if (rbLeagueId) laterSeasonsQ.eq('league_id', rbLeagueId);
+    const { data: laterSeasons } = await laterSeasonsQ;
 
-    const { data: sameSeasonLaterWeeks } = await supabase
+    const sameSeasonQ = supabase
       .from('results')
       .select('id, team1_id, team2_id, score1, score2, season, week')
       .eq('guild_id', guildId)
       .eq('season', targetSeason)
       .gt('week', targetWeek);
+    if (rbLeagueId) sameSeasonQ.eq('league_id', rbLeagueId);
+    const { data: sameSeasonLaterWeeks } = await sameSeasonQ;
 
     const toDelete = [...(laterSeasons || []), ...(sameSeasonLaterWeeks || [])];
 
     if (toDelete.length > 0) {
-      // Delete in two passes matching the same conditions
-      await supabase.from('results').delete().eq('guild_id', guildId).gt('season', targetSeason);
-      await supabase.from('results').delete().eq('guild_id', guildId).eq('season', targetSeason).gt('week', targetWeek);
+      // Delete in two passes scoped to this league
+      const del1 = supabase.from('results').delete().eq('guild_id', guildId).gt('season', targetSeason);
+      if (rbLeagueId) del1.eq('league_id', rbLeagueId);
+      await del1;
+      const del2 = supabase.from('results').delete().eq('guild_id', guildId).eq('season', targetSeason).gt('week', targetWeek);
+      if (rbLeagueId) del2.eq('league_id', rbLeagueId);
+      await del2;
 
       // 3. Recompute records for affected seasons
       const affectedSeasons = [...new Set(toDelete.map(r => r.season))];
@@ -4527,8 +4565,8 @@ client.on(Events.GuildMemberRemove, async (member) => {
   const team = await getTeamByUser(member.id, guildId).catch(() => null);
   if (!team) return; // Not a coach, nothing to do
 
-  // Unassign the team
-  await unassignTeam(team.id, guildId).catch(() => {});
+  // Unassign the team — pass league_id if available (multi-league aware)
+  await unassignTeam(team.id, guildId, team.league_id || null).catch(() => {});
 
   // Remove head coach role if applicable (member already left, so this is a no-op but safe)
   // Remove stream registration
