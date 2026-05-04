@@ -390,7 +390,132 @@ async function unassignTeam(teamId, guildId) {
     .eq('guild_id', guildId);
 }
 
+// =====================================================
+// MULTI-LEAGUE HELPERS
+// =====================================================
+
+const LEAGUE_DEFAULTS = {
+  season:            1,
+  week:              1,
+  current_phase:     'preseason',
+  current_sub_phase: 0,
+  advance_hours:     24,
+  advance_deadline:  null,
+  last_advance_at:   null,
+  next_advance_deadline: null,
+  advance_intervals: '[24, 48]',
+  advance_timezones: '["ET","CT","MT","PT"]',
+};
+
+// Get a league by its category_id within a guild
+async function getLeagueByCategoryId(guildId, categoryId) {
+  const { data } = await supabase
+    .from('leagues')
+    .select('*')
+    .eq('guild_id', guildId)
+    .eq('category_id', categoryId)
+    .single();
+  return data || null;
+}
+
+// Get the default (single-league) league for a guild
+async function getDefaultLeague(guildId) {
+  const { data } = await supabase
+    .from('leagues')
+    .select('*')
+    .eq('guild_id', guildId)
+    .eq('category_id', 'default')
+    .single();
+  return data || { ...LEAGUE_DEFAULTS, guild_id: guildId, category_id: 'default' };
+}
+
+// Get all leagues for a guild
+async function getGuildLeagues(guildId) {
+  const { data } = await supabase
+    .from('leagues')
+    .select('*')
+    .eq('guild_id', guildId)
+    .order('created_at', { ascending: true });
+  return data || [];
+}
+
+// Detect league from an interaction — handles both single and multi-league guilds
+async function getLeagueFromInteraction(interaction) {
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+
+  // Single-league guild — return the default league row
+  if (!config.multi_league) return getDefaultLeague(guildId);
+
+  // Multi-league — detect from the channel's parent category
+  const categoryId = interaction.channel?.parentId;
+  if (!categoryId) {
+    // Channel has no category — try default fallback
+    return getDefaultLeague(guildId);
+  }
+
+  const league = await getLeagueByCategoryId(guildId, categoryId);
+  if (!league) {
+    // Channel's category isn't mapped to a league
+    return null;
+  }
+  return league;
+}
+
+// Update league state (replaces setMeta for multi-league aware code)
+async function setLeague(leagueId, updates) {
+  await supabase
+    .from('leagues')
+    .update({ ...updates })
+    .eq('league_id', leagueId);
+}
+
+// Upsert a league row (used by setup wizard)
+async function upsertLeague(guildId, categoryId, data) {
+  const { data: result, error } = await supabase
+    .from('leagues')
+    .upsert(
+      { guild_id: guildId, category_id: categoryId, ...data },
+      { onConflict: 'guild_id,category_id' }
+    )
+    .select()
+    .single();
+  if (error) throw error;
+  return result;
+}
+
+// Parse league advance intervals/timezones (mirrors parseConfig logic)
+function parseLeague(league) {
+  let intervals = [24, 48];
+  try {
+    const raw = (league.advance_intervals || '').trim();
+    const normalized = raw.startsWith('[') ? raw : `[${raw}]`;
+    const parsed = JSON.parse(normalized);
+    if (Array.isArray(parsed) && parsed.length > 0) intervals = parsed.map(Number).filter(n => !isNaN(n));
+  } catch (_) {}
+
+  let timezones = ['ET', 'CT', 'MT', 'PT'];
+  try {
+    const tzs = JSON.parse(league.advance_timezones || '["ET","CT","MT","PT"]');
+    if (Array.isArray(tzs) && tzs.length > 0) timezones = tzs;
+  } catch (_) {}
+
+  return {
+    ...league,
+    advance_intervals_parsed: intervals,
+    advance_timezones_parsed:  timezones,
+  };
+}
+
+// Helper: reply with error when command is run outside a mapped league channel
+function replyNoLeague(interaction) {
+  return interaction.editReply({
+    content: '❌ **No League Found**\nThis channel is not part of a configured league. Run the command from a channel inside a league category, or ask an admin to use `/add-league`.',
+  });
+}
+
 async function getMeta(guildId) {
+  // Legacy: reads from meta table for backwards compatibility
   const { data } = await supabase.from('meta').select('*').eq('guild_id', guildId).single();
   return data || {
     season:               1,
@@ -405,7 +530,13 @@ async function getMeta(guildId) {
 }
 
 async function setMeta(guildId, updates) {
+  // Legacy: writes to meta table for backwards compatibility
   await supabase.from('meta').upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' });
+  // Also sync to leagues table (default league row)
+  await supabase.from('leagues')
+    .update(updates)
+    .eq('guild_id', guildId)
+    .eq('category_id', 'default');
 }
 
 
@@ -486,7 +617,7 @@ async function getRecord(teamId, season, guildId) {
 }
 
 async function upsertRecord(record) {
-  await supabase.from('records').upsert(record, { onConflict: 'team_id,season,guild_id' });
+  await supabase.from('records').upsert(record, { onConflict: 'team_id,season,guild_id,league_id' });
 }
 
 // =====================================================
@@ -722,6 +853,14 @@ function buildCommands() {
     new SlashCommandBuilder()
       .setName('rollback-advance')
       .setDescription('[Admin] Roll the league back to a previous season, phase, and week.'),
+
+    new SlashCommandBuilder()
+      .setName('league-list')
+      .setDescription('Show all leagues configured in this server.'),
+
+    new SlashCommandBuilder()
+      .setName('add-league')
+      .setDescription('[Admin] Add a new league to this server (multi-league mode).'),
 
   ].map(cmd => cmd.toJSON());
 }
@@ -2176,7 +2315,9 @@ async function handleGameResult(interaction) {
   const config       = await getConfig(guildId);
   if (!config.setup_complete) return replySetupRequired(interaction);
   if (!config.feature_game_result) return interaction.editReply({ content: '❌ Game results are disabled on this server.' });
-  const meta         = await getMeta(guildId);
+  const league = await getLeagueFromInteraction(interaction);
+  if (!league) return replyNoLeague(interaction);
+  const meta = league;
   const opponentName = interaction.options.getString('opponent');
   const yourScore    = interaction.options.getInteger('your-score');
   const oppScore     = interaction.options.getInteger('opponent-score');
@@ -2215,13 +2356,14 @@ async function handleGameResult(interaction) {
   }
 
   // Only write records for assigned teams to avoid bloating the DB with unmanaged teams
-  await upsertRecord({ ...yourRecord, team_id: yourTeam.id, season: meta.season, guild_id: guildId });
-  if (oppTeam.user_id) await upsertRecord({ ...oppRecord, team_id: oppTeam.id, season: meta.season, guild_id: guildId });
+  await upsertRecord({ ...yourRecord, team_id: yourTeam.id, season: meta.season, guild_id: guildId, league_id: league.league_id });
+  if (oppTeam.user_id) await upsertRecord({ ...oppRecord, team_id: oppTeam.id, season: meta.season, guild_id: guildId, league_id: league.league_id });
 
   await supabase.from('results').insert({
     guild_id: guildId, season: meta.season, week: meta.week,
     team1_id: yourTeam.id, team2_id: oppTeam.id,
     score1: yourScore, score2: oppScore, submitted_by: userId,
+    league_id: league.league_id,
   });
 
   const result = tied ? 'TIE' : (won ? 'WIN' : 'LOSS');
@@ -2267,7 +2409,9 @@ async function handleAnyGameResult(interaction) {
   const config    = await getConfig(guildId);
   if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_any_game_result) return interaction.editReply({ content: '❌ Any-game-result is disabled on this server.' });
-  const meta      = await getMeta(guildId);
+  const league = await getLeagueFromInteraction(interaction);
+  if (!league) return replyNoLeague(interaction);
+  const meta   = league;
   const team1Name = interaction.options.getString('team1');
   const team2Name = interaction.options.getString('team2');
   const score1    = interaction.options.getInteger('score1');
@@ -2297,13 +2441,14 @@ async function handleAnyGameResult(interaction) {
   else if (score2 > score1) { record2.wins++;  record1.losses++; }
 
   // Only write records for assigned teams to avoid bloating the DB with unmanaged teams
-  if (team1.user_id) await upsertRecord({ ...record1, team_id: team1.id, season: meta.season, guild_id: guildId });
-  if (team2.user_id) await upsertRecord({ ...record2, team_id: team2.id, season: meta.season, guild_id: guildId });
+  if (team1.user_id) await upsertRecord({ ...record1, team_id: team1.id, season: meta.season, guild_id: guildId, league_id: league.league_id });
+  if (team2.user_id) await upsertRecord({ ...record2, team_id: team2.id, season: meta.season, guild_id: guildId, league_id: league.league_id });
 
   await supabase.from('results').insert({
     guild_id: guildId, season: meta.season, week,
     team1_id: team1.id, team2_id: team2.id,
     score1, score2, submitted_by: interaction.user.id,
+    league_id: league.league_id,
   });
 
   const won1  = score1 > score2;
@@ -2341,15 +2486,18 @@ async function handleRanking(interaction) {
   }
 
   const meta = await getMeta(interaction.guildId);
+  const rankLeague = await getLeagueFromInteraction(interaction);
+  if (!rankLeague) return replyNoLeague(interaction);
+
   const { data: records } = await supabase
     .from('records')
     .select('*, teams(team_name, team_assignments(user_id, guild_id))')
     .eq('guild_id', interaction.guildId)
+    .eq('league_id', rankLeague.league_id)
     .eq('season', meta.season)
     .order('wins', { ascending: false });
 
   // Filter to only teams assigned in THIS guild (team_assignments is cross-guild)
-  const guildId = interaction.guildId;
   const assignedRecords = (records || []).filter(r =>
     r.teams?.team_assignments?.some(a => a.user_id && a.guild_id === guildId)
   );
@@ -2725,6 +2873,9 @@ async function postWeeklyRecap(guild, guildId, config, meta, nextPhase = null, n
     .eq('season', meta.season)
     .eq('week', meta.week)
     .order('created_at', { ascending: true });
+  // Note: postWeeklyRecap receives meta which is now a league row — league_id filtering
+  // via the week/season/guild combo is sufficient for single-league guilds;
+  // multi-league recap is handled per-league via the league row passed from handleAdvance
 
   if (!results || results.length === 0) return;
 
@@ -2799,7 +2950,10 @@ async function handleAdvance(interaction) {
     });
   }
 
-  const meta = await getMeta(guildId);
+  const rawLeague = await getLeagueFromInteraction(interaction);
+  if (!rawLeague) return replyNoLeague(interaction);
+  const league = parseLeague(rawLeague);
+  const meta   = league; // league row mirrors meta structure
 
   // ── Advance phase/sub-phase ───────────────────────────────────────────
   const currentPhase = meta.current_phase     || 'preseason';
@@ -2961,7 +3115,7 @@ async function handleAdvance(interaction) {
     if (!sameChannel) await postWeeklyRecap(interaction.guild, guildId, config, meta, newPhase, newSub);
   }
 
-  await setMeta(guildId, {
+  const metaUpdate = {
     season:                newSeason,
     week:                  newPhase === 'regular' ? newSub + 1 : (newPhase === 'preseason' ? 1 : meta.week),
     current_phase:         newPhase,
@@ -2970,7 +3124,9 @@ async function handleAdvance(interaction) {
     advance_deadline:      deadline.toISOString(),
     last_advance_at:       new Date().toISOString(),
     next_advance_deadline: deadline.toISOString(),
-  });
+  };
+  await setLeague(league.league_id, metaUpdate);
+  if (!config.multi_league) await setMeta(guildId, metaUpdate);
 
   const advanceChannel = findTextChannel(interaction.guild, config.channel_advance_tracker);
   if (advanceChannel) {
@@ -3357,7 +3513,7 @@ async function handleRollbackAdvance(interaction) {
   await dm.send('⏳ Processing rollback...');
 
   // 1. Roll meta back
-  await setMeta(guildId, {
+  const rollbackUpdate = {
     season:            targetSeason,
     week:              targetWeek,
     current_phase:     targetPhase,
@@ -3365,7 +3521,10 @@ async function handleRollbackAdvance(interaction) {
     advance_deadline:  null,
     last_advance_at:   null,
     next_advance_deadline: null,
-  });
+  };
+  const rollbackLeague = await getLeagueFromInteraction(interaction);
+  if (rollbackLeague) await setLeague(rollbackLeague.league_id, rollbackUpdate);
+  if (!config.multi_league) await setMeta(guildId, rollbackUpdate);
 
   let resultsSummary = 'Results left intact.';
 
@@ -3472,6 +3631,130 @@ async function handleRollbackAdvance(interaction) {
   }
 }
 
+// /league-list ────────────────────────────────────────────────────────────
+async function handleLeagueList(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+  if (!config.setup_complete) return replySetupRequired(interaction);
+
+  const leagues = await getGuildLeagues(guildId);
+  if (!leagues.length) return interaction.editReply({ content: '❌ No leagues found for this server.' });
+
+  const fields = leagues.map(l => {
+    const phase = formatPhase(l.current_phase, l.current_sub_phase);
+    const cat   = l.category_id === 'default' ? 'Server-wide' : `<#${l.category_id}>`;
+    return {
+      name:   l.league_name,
+      value:  `Season ${l.season} · ${phase}\nCategory: ${cat}`,
+      inline: false,
+    };
+  });
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🏟️ Leagues — ${config.league_name || interaction.guild.name}`)
+    .setColor(config.embed_color_primary_int || 0x1e90ff)
+    .addFields(fields)
+    .setFooter({ text: `${leagues.length} league(s) configured` })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+// /add-league ─────────────────────────────────────────────────────────────
+async function handleAddLeague(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+
+  const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
+  if (!config.setup_complete) return replySetupRequired(interaction);
+
+  let dm;
+  try {
+    dm = await interaction.user.createDM();
+  } catch {
+    return interaction.editReply({ content: '❌ Could not open a DM. Please allow DMs from server members.' });
+  }
+  await interaction.editReply({ content: '📬 Check your DMs — add league wizard is starting!' });
+
+  const ask = async (prompt) => {
+    await dm.send(prompt);
+    try {
+      const collected = await dm.awaitMessages({ filter: m => m.author.id === interaction.user.id, max: 1, time: 120000, errors: ['time'] });
+      return collected.first().content.trim();
+    } catch { return null; }
+  };
+
+  // Step 1: League name
+  const leagueName = await ask('🏟️ **Add League Wizard**\n\n**[Step 1/2]** What is the name of this league?\nExample: `East Division`');
+  if (!leagueName) return dm.send('⏰ Timed out — cancelled.');
+
+  // Step 2: Pick category
+  const categories = interaction.guild.channels.cache
+    .filter(c => c.type === 4) // CategoryChannel
+    .sort((a, b) => a.position - b.position);
+
+  if (!categories.size) return dm.send('❌ No categories found in this server. Create a Discord category first, then run `/add-league` again.');
+
+  // Show categories as buttons (up to 20)
+  const catArray = [...categories.values()].slice(0, 20);
+  const rows = [];
+  for (let i = 0; i < catArray.length; i += 5) {
+    rows.push(new ActionRowBuilder().addComponents(
+      catArray.slice(i, i + 5).map(cat =>
+        new ButtonBuilder()
+          .setCustomId(`cat_${cat.id}`)
+          .setLabel(cat.name.slice(0, 80))
+          .setStyle(ButtonStyle.Secondary)
+      )
+    ));
+  }
+
+  const catMsg = await dm.send({ content: '**[Step 2/2]** Which category does this league live in?', components: rows });
+  let categoryId, categoryName;
+  try {
+    const btn = await catMsg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
+    await btn.update({ components: [] });
+    categoryId   = btn.customId.replace('cat_', '');
+    categoryName = catArray.find(c => c.id === categoryId)?.name || categoryId;
+  } catch {
+    return dm.send('⏰ Timed out — cancelled.');
+  }
+
+  // Check for duplicate
+  const existing = await getLeagueByCategoryId(guildId, categoryId);
+  if (existing) return dm.send(`❌ **${categoryName}** is already mapped to league **${existing.league_name}**.`);
+
+  // Save the new league
+  const newLeague = await upsertLeague(guildId, categoryId, {
+    league_name:        leagueName,
+    season:             1,
+    week:               1,
+    current_phase:      'preseason',
+    current_sub_phase:  0,
+    advance_hours:      config.advance_hours || 24,
+    channel_news_feed:      config.channel_news_feed,
+    channel_advance_tracker: config.channel_advance_tracker,
+    channel_signed_coaches:  config.channel_signed_coaches,
+    channel_streaming:       config.channel_streaming,
+    channel_team_lists:      config.channel_team_lists,
+  });
+
+  // Enable multi_league on the guild config
+  await saveConfig(guildId, { multi_league: true });
+  guildConfigs.delete(guildId);
+
+  await dm.send(
+    `✅ **League Added!**\n\n` +
+    `**Name:** ${leagueName}\n` +
+    `**Category:** ${categoryName}\n\n` +
+    `Commands run in channels inside **${categoryName}** will now use this league's state.\n` +
+    `Use \`/set-phase\` from within that category to set the starting season and phase.`
+  );
+}
+
 // /reload-commands ───────────────────────────────────────────────────
 async function handleReloadCommands(interaction) {
   await interaction.deferReply({ flags: 64 });
@@ -3494,7 +3777,10 @@ async function handleSetPhase(interaction) {
   const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
   if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
 
-  const season   = interaction.options.getInteger('season');
+  const league = await getLeagueFromInteraction(interaction);
+  if (!league) return replyNoLeague(interaction);
+
+  const season   = interaction.options.getInteger('season') ?? league.season;
   const phaseKey = interaction.options.getString('phase');
   const subInput = interaction.options.getInteger('sub');
 
@@ -3516,12 +3802,14 @@ async function handleSetPhase(interaction) {
              : phaseKey === 'preseason' ? 1
              : 17; // bowl / offseason — post-regular-season
 
-  await setMeta(guildId, {
+  const setPhaseUpdate = {
     season,
     week,
     current_phase:     phaseKey,
     current_sub_phase: sub,
-  });
+  };
+  await setLeague(league.league_id, setPhaseUpdate);
+  if (!config.multi_league) await setMeta(guildId, setPhaseUpdate);
 
   const label = formatPhase(phaseKey, sub);
 
@@ -4082,6 +4370,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'set-phase':          return handleSetPhase(interaction);
         case 'reload-commands':    return handleReloadCommands(interaction);
         case 'rollback-advance':   return handleRollbackAdvance(interaction);
+        case 'league-list':         return handleLeagueList(interaction);
+        case 'add-league':          return handleAddLeague(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
         case 'streamer':          return handleStreaming(interaction);
         case 'config':
