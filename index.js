@@ -35,13 +35,27 @@ const CLIENT_ID     = process.env.CLIENT_ID;
 const PORT          = process.env.PORT || 3000;
 const SELF_PING_URL = process.env.SELF_PING_URL || '';
 
+
+import { createClient } from '@supabase/supabase-js';
+import ws from 'ws';
+
 if (!DISCORD_TOKEN || !SUPABASE_URL || !SUPABASE_KEY || !CLIENT_ID) {
   console.error('[boot] Missing required environment variables. Check DISCORD_TOKEN, SUPABASE_URL, SUPABASE_KEY, CLIENT_ID.');
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  realtime: {
+    transport: ws,
+  params: {
+      eventsPerSecond: 10,
+    },
+  },
+  auth: {
+    autoRefreshToken: true,
+    persistSession: true,
+  }
+});
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
