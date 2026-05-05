@@ -1223,6 +1223,91 @@ async function handleSetup(interaction) {
     };
   }
 
+  // ── Multi-League Setup ───────────────────────────────────────────────────
+  const multiLeagueChoice = await askButtons(
+    '**— League Mode —**\nWill this server host multiple leagues in separate categories?\n\n' +
+    '• **Single League** — one league for the whole server (default)\n' +
+    '• **Multi-League** — each Discord category is a separate league',
+    [
+      { id: 'single', label: '➡️ Single League',  style: ButtonStyle.Primary },
+      { id: 'multi',  label: '🏟️ Multi-League',   style: ButtonStyle.Secondary },
+    ]
+  );
+  if (!multiLeagueChoice) return;
+  const isMultiLeague = multiLeagueChoice === 'multi';
+
+  // For multi-league: collect category mappings
+  const additionalLeagues = []; // { leagueName, categoryId, categoryName }
+  if (isMultiLeague) {
+    const categories = guild.channels.cache
+      .filter(c => c.type === 4)
+      .sort((a, b) => a.position - b.position);
+
+    if (!categories.size) {
+      await dm.send('⚠️ No Discord categories found. The server will be set up as single-league. You can add leagues later with `/add-league`.');
+    } else {
+      await dm.send(
+        `🏟️ **Multi-League Mode**\n\nYou can assign each Discord category to a separate league. ` +
+        `The main league (**${leagueName}**) will be the server-wide default.\n\n` +
+        `Let\'s configure additional leagues now. You can always add more later with \`/add-league\`.`
+      );
+
+      let addingLeagues = true;
+      while (addingLeagues) {
+        // Filter out already-mapped categories
+        const mappedIds = new Set(additionalLeagues.map(l => l.categoryId));
+        const available = [...categories.values()].filter(c => !mappedIds.has(c.id)).slice(0, 20);
+
+        if (!available.length) {
+          await dm.send('✅ All categories have been mapped to leagues.');
+          break;
+        }
+
+        const addAnother = await askButtons(
+          additionalLeagues.length === 0
+            ? '**[Multi-League]** Would you like to map a category to a league?'
+            : `**[Multi-League]** ${additionalLeagues.length} league(s) added. Add another?`,
+          [
+            { id: 'yes', label: '➕ Add League',  style: ButtonStyle.Primary },
+            { id: 'no',  label: '✅ Done',         style: ButtonStyle.Success },
+          ]
+        );
+        if (!addAnother || addAnother === 'no') { addingLeagues = false; break; }
+
+        // League name
+        const newLeagueName = await ask('What is the name of this league?\nExample: `East Division`');
+        if (!newLeagueName) return;
+
+        // Pick category
+        const catRows = [];
+        for (let i = 0; i < available.length; i += 5) {
+          catRows.push(new ActionRowBuilder().addComponents(
+            available.slice(i, i + 5).map(cat =>
+              new ButtonBuilder()
+                .setCustomId(`mlcat_${cat.id}`)
+                .setLabel(cat.name.slice(0, 80))
+                .setStyle(ButtonStyle.Secondary)
+            )
+          ));
+        }
+        const catMsg = await dm.send({ content: `Which category should **${newLeagueName}** use?`, components: catRows });
+        let pickedCatId, pickedCatName;
+        try {
+          const btn = await catMsg.awaitMessageComponent({ filter: i => i.user.id === userId, time: 120000 });
+          await btn.update({ components: [] });
+          pickedCatId   = btn.customId.replace('mlcat_', '');
+          pickedCatName = available.find(c => c.id === pickedCatId)?.name || pickedCatId;
+        } catch {
+          await dm.send(TIMEOUT_MSG);
+          return;
+        }
+
+        additionalLeagues.push({ leagueName: newLeagueName, categoryId: pickedCatId, categoryName: pickedCatName });
+        await dm.send(`✅ **${newLeagueName}** mapped to **${pickedCatName}**.`);
+      }
+    }
+  }
+
   // ── Group-Based Feature Selection ────────────────────────────────────────
 
   // Helper: ask about one feature group — Enable All / Disable All / Customize
@@ -1477,7 +1562,40 @@ async function handleSetup(interaction) {
       ...advanceConfig,
       setup_complete:      true,
       league_type:         leagueType,
+      multi_league:        isMultiLeague,
     });
+
+    // ── Save default league row (synced by setMeta above) ─────────────────
+    await upsertLeague(guildId, 'default', {
+      league_name:             leagueName,
+      ...initialMeta,
+      advance_intervals:       advanceConfig.advance_intervals || '[24, 48]',
+      advance_timezones:       advanceConfig.advance_timezones || '["ET","CT","MT","PT"]',
+      channel_news_feed:       channelConfig.channel_news_feed,
+      channel_advance_tracker: channelConfig.channel_advance_tracker,
+      channel_signed_coaches:  channelConfig.channel_signed_coaches,
+      channel_streaming:       channelConfig.channel_streaming,
+      channel_team_lists:      channelConfig.channel_team_lists,
+    });
+
+    // ── Save additional leagues for multi-league servers ──────────────────
+    for (const al of additionalLeagues) {
+      await upsertLeague(guildId, al.categoryId, {
+        league_name:             al.leagueName,
+        season:                  1,
+        week:                    1,
+        current_phase:           'preseason',
+        current_sub_phase:       0,
+        advance_hours:           24,
+        advance_intervals:       advanceConfig.advance_intervals || '[24, 48]',
+        advance_timezones:       advanceConfig.advance_timezones || '["ET","CT","MT","PT"]',
+        channel_news_feed:       channelConfig.channel_news_feed,
+        channel_advance_tracker: channelConfig.channel_advance_tracker,
+        channel_signed_coaches:  channelConfig.channel_signed_coaches,
+        channel_streaming:       channelConfig.channel_streaming,
+        channel_team_lists:      channelConfig.channel_team_lists,
+      });
+    }
 
     // ── Summary Embed — group-based display ───────────────────────────────
     const fv = (flag) => features[flag] ? '✅' : '❌';
@@ -3765,6 +3883,25 @@ async function handleAddLeague(interaction) {
   const existing = await getLeagueByCategoryId(guildId, categoryId);
   if (existing) return dm.send(`❌ **${categoryName}** is already mapped to league **${existing.league_name}**.`);
 
+  // Step 3: configure channels for this league
+  await dm.send(
+    '**[Step 3/3]** Configure channels for this league.\n' +
+    'These can be the same as your main league or different ones.\nType the channel name exactly, or type `skip` to use the server default.'
+  );
+
+  const askChannel = async (label, defaultVal) => {
+    const response = await ask(`${label}\nCurrent default: \`${defaultVal || 'none'}\`\nType channel name or \`skip\``);
+    if (!response) return defaultVal;
+    return response.toLowerCase() === 'skip' ? defaultVal : response.replace(/^#/, '');
+  };
+
+  const newsFeed      = await askChannel('📰 **News Feed** — Where should game results post?', config.channel_news_feed);
+  if (newsFeed === null) return dm.send('⏰ Timed out — cancelled.');
+  const advTracker    = await askChannel('⏱️ **Advance Tracker** — Where should advance deadlines post?', config.channel_advance_tracker);
+  if (advTracker === null) return dm.send('⏰ Timed out — cancelled.');
+  const signedCoaches = await askChannel('📋 **Signed Coaches** — Where should coach assignments post?', config.channel_signed_coaches);
+  if (signedCoaches === null) return dm.send('⏰ Timed out — cancelled.');
+
   // Save the new league
   const newLeague = await upsertLeague(guildId, categoryId, {
     league_name:        leagueName,
@@ -3773,9 +3910,9 @@ async function handleAddLeague(interaction) {
     current_phase:      'preseason',
     current_sub_phase:  0,
     advance_hours:      config.advance_hours || 24,
-    channel_news_feed:      config.channel_news_feed,
-    channel_advance_tracker: config.channel_advance_tracker,
-    channel_signed_coaches:  config.channel_signed_coaches,
+    channel_news_feed:       newsFeed,
+    channel_advance_tracker: advTracker,
+    channel_signed_coaches:  signedCoaches,
     channel_streaming:       config.channel_streaming,
     channel_team_lists:      config.channel_team_lists,
   });
@@ -3787,7 +3924,10 @@ async function handleAddLeague(interaction) {
   await dm.send(
     `✅ **League Added!**\n\n` +
     `**Name:** ${leagueName}\n` +
-    `**Category:** ${categoryName}\n\n` +
+    `**Category:** ${categoryName}\n` +
+    `**News Feed:** #${newsFeed || 'not set'}\n` +
+    `**Advance Tracker:** #${advTracker || 'not set'}\n` +
+    `**Signed Coaches:** #${signedCoaches || 'not set'}\n\n` +
     `Commands run in channels inside **${categoryName}** will now use this league's state.\n` +
     `Use \`/set-phase\` from within that category to set the starting season and phase.`
   );
@@ -4044,6 +4184,20 @@ async function handleHelp(interaction) {
       title:     '↩️ `/rollback-advance`',
       usage:     '/rollback-advance',
       desc:      "Roll the league back to a previous season and week via DM. Optionally delete game results submitted after that point and recalculate records.",
+    },
+    {
+      flag:      null,
+      adminOnly: false,
+      title:     '🏟️ `/league-list`',
+      usage:     '/league-list',
+      desc:      'Show all leagues configured in this server, along with their current season and phase.',
+    },
+    {
+      flag:      null,
+      adminOnly: true,
+      title:     '➕ `/add-league`',
+      usage:     '/add-league',
+      desc:      'Add a new league to this server via DM wizard. Maps a Discord category to a league with its own season, phase, and channels. Automatically enables multi-league mode.',
     },
   ];
 
