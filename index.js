@@ -23,7 +23,7 @@ const {
   ChannelType,
   Events,
 } = require('discord.js');
-const { createClient } = require('@supabase/supabase-js');
+
 
 // =====================================================
 // ENVIRONMENT & CLIENTS
@@ -36,7 +36,6 @@ const PORT          = process.env.PORT || 3000;
 const SELF_PING_URL = process.env.SELF_PING_URL || '';
 
 
-const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
 
 if (!DISCORD_TOKEN || !SUPABASE_URL || !SUPABASE_KEY || !CLIENT_ID) {
