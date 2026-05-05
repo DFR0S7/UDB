@@ -36,8 +36,8 @@ const PORT          = process.env.PORT || 3000;
 const SELF_PING_URL = process.env.SELF_PING_URL || '';
 
 
-import { createClient } from '@supabase/supabase-js';
-import ws from 'ws';
+const { createClient } = require('@supabase/supabase-js');
+const ws = require('ws');
 
 if (!DISCORD_TOKEN || !SUPABASE_URL || !SUPABASE_KEY || !CLIENT_ID) {
   console.error('[boot] Missing required environment variables. Check DISCORD_TOKEN, SUPABASE_URL, SUPABASE_KEY, CLIENT_ID.');
