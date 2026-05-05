@@ -24,6 +24,7 @@ const {
   Events,
 } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
+const ws = require('ws');
 
 // =====================================================
 // ENVIRONMENT & CLIENTS
@@ -40,7 +41,9 @@ if (!DISCORD_TOKEN || !SUPABASE_URL || !SUPABASE_KEY || !CLIENT_ID) {
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  realtime: { transport: ws },
+});
 
 const client = new Client({
   intents: [
