@@ -23,7 +23,7 @@ const {
   ChannelType,
   Events,
 } = require('discord.js');
-
+const { createClient } = require('@supabase/supabase-js');
 
 // =====================================================
 // ENVIRONMENT & CLIENTS
@@ -35,26 +35,13 @@ const CLIENT_ID     = process.env.CLIENT_ID;
 const PORT          = process.env.PORT || 3000;
 const SELF_PING_URL = process.env.SELF_PING_URL || '';
 
-
-const ws = require('ws');
-
 if (!DISCORD_TOKEN || !SUPABASE_URL || !SUPABASE_KEY || !CLIENT_ID) {
   console.error('[boot] Missing required environment variables. Check DISCORD_TOKEN, SUPABASE_URL, SUPABASE_KEY, CLIENT_ID.');
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
-  realtime: {
-    transport: ws,
-  params: {
-      eventsPerSecond: 10,
-    },
-  },
-  auth: {
-    autoRefreshToken: true,
-    persistSession: true,
-  }
-});
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -1248,6 +1235,7 @@ async function handleSetup(interaction) {
   );
   if (!multiLeagueChoice) return;
   const isMultiLeague = multiLeagueChoice === 'multi';
+  let mainLeagueCategoryId = null; // set during multi-league category mapping
 
   // For multi-league: collect category mappings
   const additionalLeagues = []; // { leagueName, categoryId, categoryName }
@@ -1317,6 +1305,39 @@ async function handleSetup(interaction) {
 
         additionalLeagues.push({ leagueName: newLeagueName, categoryId: pickedCatId, categoryName: pickedCatName });
         await dm.send(`✅ **${newLeagueName}** mapped to **${pickedCatName}**.`);
+      }
+    }
+
+    // Ask which category the MAIN league lives in
+    const mappedIds = new Set(additionalLeagues.map(l => l.categoryId));
+    const remainingCats = [...categories.values()].filter(c => !mappedIds.has(c.id)).slice(0, 20);
+    if (remainingCats.length > 0) {
+      const mainCatRows = [];
+      for (let i = 0; i < remainingCats.length; i += 5) {
+        mainCatRows.push(new ActionRowBuilder().addComponents(
+          remainingCats.slice(i, i + 5).map(cat =>
+            new ButtonBuilder()
+              .setCustomId(`mlmain_${cat.id}`)
+              .setLabel(cat.name.slice(0, 80))
+              .setStyle(ButtonStyle.Secondary)
+          )
+        ));
+      }
+      // Add a "No Category" option
+      mainCatRows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('mlmain_none')
+          .setLabel('🌐 No Category (server-wide)')
+          .setStyle(ButtonStyle.Primary)
+      ));
+      const mainCatMsg = await dm.send({ content: `Which category does the main league (**${leagueName}**) live in?`, components: mainCatRows });
+      try {
+        const btn = await mainCatMsg.awaitMessageComponent({ filter: i => i.user.id === userId, time: 120000 });
+        await btn.update({ components: [] });
+        mainLeagueCategoryId = btn.customId === 'mlmain_none' ? null : btn.customId.replace('mlmain_', '');
+      } catch {
+        await dm.send(TIMEOUT_MSG);
+        return;
       }
     }
   }
@@ -1412,30 +1433,39 @@ async function handleSetup(interaction) {
   const needsStreaming = features.feature_game_results_reminder || features.feature_stream_autopost || features.feature_streaming_list;
 
   if (needsNewsFeed || needsSigned || needsTeamList || needsAdvance || needsStreaming) {
-    await dm.send('**— Channel Setup —**\nSelect the channel for each feature group.');
+    // For multi-league: filter channels to the main league's category
+    const mainCategoryChannels = (isMultiLeague && mainLeagueCategoryId)
+      ? textChannels.filter(c => c.parentId === mainLeagueCategoryId)
+      : textChannels;
+    const channelList = mainCategoryChannels.length > 0 ? mainCategoryChannels : textChannels;
+
+    const catLabel = (isMultiLeague && mainLeagueCategoryId)
+      ? ` (showing channels in **${guild.channels.cache.get(mainLeagueCategoryId)?.name || 'selected category'}**)`
+      : '';
+    await dm.send(`**— Channel Setup —**\nSelect the channel for each feature group.${catLabel}`);
 
     if (needsNewsFeed) {
-      const ch = await pickChannel('📰 **News Feed** — Where should game results and standings post?', textChannels);
+      const ch = await pickChannel('📰 **News Feed** — Where should game results and standings post?', channelList);
       if (!ch) return;
       channelConfig.channel_news_feed = ch.name;
     }
     if (needsSigned) {
-      const ch = await pickChannel('✍️ **Signed Coaches** — Where should coach signing announcements post?', textChannels);
+      const ch = await pickChannel('✍️ **Signed Coaches** — Where should coach signing announcements post?', channelList);
       if (!ch) return;
       channelConfig.channel_signed_coaches = ch.name;
     }
     if (needsTeamList) {
-      const ch = await pickChannel('📋 **Team Lists** — Where should the available teams list post?', textChannels);
+      const ch = await pickChannel('📋 **Team Lists** — Where should the available teams list post?', channelList);
       if (!ch) return;
       channelConfig.channel_team_lists = ch.name;
     }
     if (needsAdvance) {
-      const ch = await pickChannel('⏱️ **Advance Tracker** — Where should advance deadline notices post?', textChannels);
+      const ch = await pickChannel('⏱️ **Advance Tracker** — Where should advance deadline notices post?', channelList);
       if (!ch) return;
       channelConfig.channel_advance_tracker = ch.name;
     }
     if (needsStreaming) {
-      const ch = await pickChannel('🎮 **Streaming** — Which channel should the bot monitor for stream links?', textChannels);
+      const ch = await pickChannel('🎮 **Streaming** — Which channel should the bot monitor for stream links?', channelList);
       if (!ch) return;
       channelConfig.channel_streaming = ch.name;
     }
@@ -3896,24 +3926,49 @@ async function handleAddLeague(interaction) {
   const existing = await getLeagueByCategoryId(guildId, categoryId);
   if (existing) return dm.send(`❌ **${categoryName}** is already mapped to league **${existing.league_name}**.`);
 
-  // Step 3: configure channels for this league
-  await dm.send(
-    '**[Step 3/3]** Configure channels for this league.\n' +
-    'These can be the same as your main league or different ones.\nType the channel name exactly, or type `skip` to use the server default.'
-  );
+  // Step 3: configure channels for this league — filtered to selected category
+  const categoryChannels = interaction.guild.channels.cache
+    .filter(c => c.type === ChannelType.GuildText && c.parentId === categoryId)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(c => c);
 
-  const askChannel = async (label, defaultVal) => {
-    const response = await ask(`${label}\nCurrent default: \`${defaultVal || 'none'}\`\nType channel name or \`skip\``);
-    if (!response) return defaultVal;
-    return response.toLowerCase() === 'skip' ? defaultVal : response.replace(/^#/, '');
+  const pickLeagueChannel = async (label, defaultVal) => {
+    if (categoryChannels.size === 0) {
+      // No channels in category — fall back to text input
+      const response = await ask(`${label}\nNo channels found in **${categoryName}**. Type the channel name or \`skip\`.`);
+      if (!response) return defaultVal;
+      return response.toLowerCase() === 'skip' ? defaultVal : response.replace(/^#/, '');
+    }
+    const chList = [...categoryChannels.values()];
+    const rows = [];
+    for (let i = 0; i < chList.length; i += 5) {
+      rows.push(new ActionRowBuilder().addComponents(
+        chList.slice(i, i + 5).map(ch =>
+          new ButtonBuilder()
+            .setCustomId(`lch_${ch.id}`)
+            .setLabel('#' + ch.name)
+            .setStyle(ButtonStyle.Secondary)
+        )
+      ));
+    }
+    // Add skip button
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('lch_skip').setLabel(`⏭️ Skip (use default: #${defaultVal || 'none'})`).setStyle(ButtonStyle.Primary)
+    ));
+    const msg = await dm.send({ content: label, components: rows });
+    try {
+      const btn = await msg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
+      await btn.update({ components: [] });
+      if (btn.customId === 'lch_skip') return defaultVal;
+      const ch = chList.find(c => c.id === btn.customId.replace('lch_', ''));
+      return ch?.name || defaultVal;
+    } catch { return defaultVal; }
   };
 
-  const newsFeed      = await askChannel('📰 **News Feed** — Where should game results post?', config.channel_news_feed);
-  if (newsFeed === null) return dm.send('⏰ Timed out — cancelled.');
-  const advTracker    = await askChannel('⏱️ **Advance Tracker** — Where should advance deadlines post?', config.channel_advance_tracker);
-  if (advTracker === null) return dm.send('⏰ Timed out — cancelled.');
-  const signedCoaches = await askChannel('📋 **Signed Coaches** — Where should coach assignments post?', config.channel_signed_coaches);
-  if (signedCoaches === null) return dm.send('⏰ Timed out — cancelled.');
+  await dm.send(`**[Step 3/3]** Configure channels for **${leagueName}** (showing channels in **${categoryName}**).`);
+  const newsFeed      = await pickLeagueChannel('📰 **News Feed** — Where should game results post?', config.channel_news_feed);
+  const advTracker    = await pickLeagueChannel('⏱️ **Advance Tracker** — Where should advance deadlines post?', config.channel_advance_tracker);
+  const signedCoaches = await pickLeagueChannel('📋 **Signed Coaches** — Where should coach assignments post?', config.channel_signed_coaches);
 
   // Save the new league
   const newLeague = await upsertLeague(guildId, categoryId, {
