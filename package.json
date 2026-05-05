@@ -19,3 +19,4 @@
   "license": "UNLICENSED",
   "private": true
 }
+"ws": "^8.18.0"
