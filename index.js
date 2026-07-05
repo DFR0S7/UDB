@@ -153,6 +153,7 @@ const CONFIG_DEFAULTS = {
   feature_stream_autopost:      false,
   feature_streaming_list:       false,
   feature_custom_conferences:   false,
+  feature_promotion_relegation:  false,
   // ── Channels ──────────────────────────────────
   channel_news_feed:            'news-feed',
   channel_advance_tracker:      'advance-tracker',
@@ -1342,7 +1343,8 @@ async function handleSetup(interaction) {
   const streamingCmds = [
     { label: 'Streamer Register', id: 'feature_stream_autopost' },
     { label: 'Streamer List',     id: 'feature_streaming_list' },
-    { label: 'Custom Conferences', id: 'feature_custom_conferences' },
+    { label: 'Custom Conferences',      id: 'feature_custom_conferences' },
+    { label: '↳ Promotion/Relegation', id: 'feature_promotion_relegation' },
   ];
 
   if (leagueType === 'established') await dm.send('💡 **Game Day — Recommendation:** Enable this if you want coaches to record game results. You can always turn it on later via `/config features`.');
@@ -1373,6 +1375,7 @@ async function handleSetup(interaction) {
     feature_stream_autopost:       allEnabled.includes('feature_stream_autopost'),
     feature_streaming_list:        allEnabled.includes('feature_streaming_list'),
     feature_custom_conferences:    allEnabled.includes('feature_custom_conferences'),
+    feature_promotion_relegation:   allEnabled.includes('feature_promotion_relegation'),
   };
 
   // ── Channel Setup ─────────────────────────────────────────────────────────
@@ -1820,7 +1823,8 @@ const FEATURE_GROUPS = [
     commands: [
       { id: 'feature_stream_autopost',  label: 'Streamer Register', desc: 'Store handle for use with Wamellow' },
       { id: 'feature_streaming_list',   label: 'Streamer List',   desc: '/streamer list for Wamellow' },
-      { id: 'feature_custom_conferences', label: 'Custom Conferences', desc: 'Custom tier/division structure for team list (e.g. promotion/relegation)' },
+      { id: 'feature_custom_conferences',  label: 'Custom Conferences',      desc: 'Custom tier/division structure for team list instead of standard conferences' },
+      { id: 'feature_promotion_relegation', label: '↳ Promotion/Relegation', desc: 'Enables /promote-relegate command. Requires Custom Conferences to be on.' },
     ],
   },
 ];
@@ -3867,7 +3871,8 @@ async function handlePromoteRelegate(interaction) {
   const config   = await getConfig(guildId);
   const isAdmin  = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
   if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
-  if (!config.feature_custom_conferences) return interaction.editReply({ content: '❌ Custom Conferences is not enabled.' });
+  if (!config.feature_custom_conferences) return interaction.editReply({ content: '❌ Custom Conferences is not enabled. Turn it on in `/config features`.' });
+  if (!config.feature_promotion_relegation) return interaction.editReply({ content: '❌ Promotion/Relegation is not enabled. Turn it on in `/config features`.' });
 
   let dm;
   try { dm = await interaction.user.createDM(); }
