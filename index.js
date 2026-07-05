@@ -152,6 +152,7 @@ const CONFIG_DEFAULTS = {
   feature_advance:              false,
   feature_stream_autopost:      false,
   feature_streaming_list:       false,
+  feature_custom_conferences:   false,
   // ── Channels ──────────────────────────────────
   channel_news_feed:            'news-feed',
   channel_advance_tracker:      'advance-tracker',
@@ -812,6 +813,22 @@ function buildCommands() {
       .setName('reset-league')
       .setDescription('[Admin] Reset league data for this server. Use with caution.'),
 
+    new SlashCommandBuilder()
+      .setName('conference-setup')
+      .setDescription('[Admin] Set up custom tier/division structure for the team list.'),
+
+    new SlashCommandBuilder()
+      .setName('set-conference')
+      .setDescription('[Admin] Assign a team to a custom tier and division.')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
+      .addStringOption(o => o.setName('tier').setDescription('Tier name (e.g. Premier)').setRequired(true).setAutocomplete(true))
+      .addStringOption(o => o.setName('division').setDescription('Division name (e.g. East)').setRequired(true).setAutocomplete(true)),
+
+    new SlashCommandBuilder()
+      .setName('promote-relegate')
+      .setDescription('[Admin] Move a team up or down a tier within their division.'),
+
   ].map(cmd => cmd.toJSON());
 }
 
@@ -1325,6 +1342,7 @@ async function handleSetup(interaction) {
   const streamingCmds = [
     { label: 'Streamer Register', id: 'feature_stream_autopost' },
     { label: 'Streamer List',     id: 'feature_streaming_list' },
+    { label: 'Custom Conferences', id: 'feature_custom_conferences' },
   ];
 
   if (leagueType === 'established') await dm.send('💡 **Game Day — Recommendation:** Enable this if you want coaches to record game results. You can always turn it on later via `/config features`.');
@@ -1354,6 +1372,7 @@ async function handleSetup(interaction) {
     feature_advance:               allEnabled.includes('feature_advance'),
     feature_stream_autopost:       allEnabled.includes('feature_stream_autopost'),
     feature_streaming_list:        allEnabled.includes('feature_streaming_list'),
+    feature_custom_conferences:    allEnabled.includes('feature_custom_conferences'),
   };
 
   // ── Channel Setup ─────────────────────────────────────────────────────────
@@ -1801,6 +1820,7 @@ const FEATURE_GROUPS = [
     commands: [
       { id: 'feature_stream_autopost',  label: 'Streamer Register', desc: 'Store handle for use with Wamellow' },
       { id: 'feature_streaming_list',   label: 'Streamer List',   desc: '/streamer list for Wamellow' },
+      { id: 'feature_custom_conferences', label: 'Custom Conferences', desc: 'Custom tier/division structure for team list (e.g. promotion/relegation)' },
     ],
   },
 ];
@@ -2640,6 +2660,44 @@ async function handleListTeams(interaction) {
 }
 
 // postTeamList — internal helper, no interaction object needed
+// =====================================================
+// CUSTOM CONFERENCE HELPERS
+// =====================================================
+
+async function getCustomConferences(guildId, leagueId = null) {
+  let q = supabase.from('custom_conferences').select('*').eq('guild_id', guildId);
+  if (leagueId) q = q.eq('league_id', leagueId);
+  const { data } = await q.order('position').order('division_name');
+  return data || [];
+}
+
+async function upsertCustomConference(guildId, leagueId, tierName, divisionName, position) {
+  const { data, error } = await supabase.from('custom_conferences')
+    .upsert(
+      { guild_id: guildId, league_id: leagueId, tier_name: tierName, division_name: divisionName, position },
+      { onConflict: 'guild_id,league_id,tier_name,division_name' }
+    ).select().single();
+  if (error) throw error;
+  return data;
+}
+
+async function deleteCustomConference(id) {
+  await supabase.from('custom_conferences').delete().eq('id', id);
+}
+
+async function setTeamCustomConference(teamId, guildId, customConferenceId) {
+  await supabase.from('team_assignments')
+    .update({ custom_conference_id: customConferenceId })
+    .eq('team_id', teamId).eq('guild_id', guildId);
+}
+
+async function getTeamCustomConference(teamId, guildId) {
+  const { data } = await supabase.from('team_assignments')
+    .select('custom_conference_id, custom_conferences(*)')
+    .eq('team_id', teamId).eq('guild_id', guildId).maybeSingle();
+  return data?.custom_conferences || null;
+}
+
 async function postTeamList(guild, guildId, config) {
   if (!config.feature_list_teams) return;
   const listsChannel = findTextChannel(guild, config.channel_team_lists);
@@ -2652,23 +2710,83 @@ async function postTeamList(guild, guildId, config) {
   const maxRating = config.star_rating_max_for_offers || 999;
   const teams = allTeams.filter(t => t.user_id || (t.star_rating != null && parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating));
 
-  const confMap = {};
-  for (const t of teams) {
-    const conf = t.conference || 'Independent';
-    if (!confMap[conf]) confMap[conf] = [];
-    confMap[conf].push(t);
-  }
-
   const fields = [];
-  for (const [conf, confTeams] of Object.entries(confMap).sort()) {
-    const lines = confTeams
-      .sort((a, b) => (b.star_rating || 0) - (a.star_rating || 0))
-      .map(t => t.user_id
-        ? `🏈 **${t.team_name}** — <@${t.user_id}> (${t.star_rating || '?'}⭐)`
-        : `🟢 **${t.team_name}** — Available (${t.star_rating || '?'}⭐)`
-      );
-    for (let i = 0; i < lines.length; i += 15) {
-      fields.push({ name: i === 0 ? `__${conf}__` : `__${conf} (cont.)__`, value: lines.slice(i, i + 15).join('\n'), inline: false });
+
+  if (config.feature_custom_conferences) {
+    // ── Custom tier/division display ────────────────────────────────────────
+    const customConfs = await getCustomConferences(guildId);
+
+    // Build a map of custom_conference_id -> teams
+    const confTeamMap = {};
+    for (const cc of customConfs) confTeamMap[cc.id] = [];
+
+    // Unassigned to any custom conference
+    const unassigned = [];
+
+    for (const t of teams) {
+      if (t.custom_conference_id && confTeamMap[t.custom_conference_id] !== undefined) {
+        confTeamMap[t.custom_conference_id].push(t);
+      } else {
+        unassigned.push(t);
+      }
+    }
+
+    // Group by tier position, then list each division
+    const tierPositions = [...new Set(customConfs.map(cc => cc.position))].sort((a, b) => a - b);
+
+    for (const pos of tierPositions) {
+      const divisionsAtTier = customConfs.filter(cc => cc.position === pos);
+      const tierName = divisionsAtTier[0]?.tier_name || `Tier ${pos}`;
+
+      for (const cc of divisionsAtTier) {
+        const confTeams = (confTeamMap[cc.id] || [])
+          .sort((a, b) => (a.team_name || '').localeCompare(b.team_name || ''));
+        const label = `__${tierName} — ${cc.division_name}__`;
+        if (confTeams.length === 0) {
+          fields.push({ name: label, value: '*No teams assigned*', inline: false });
+          continue;
+        }
+        const lines = confTeams.map(t => t.user_id
+          ? `🏈 **${t.team_name}** — <@${t.user_id}> (${t.star_rating || '?'}⭐)`
+          : `🟢 **${t.team_name}** — Available (${t.star_rating || '?'}⭐)`
+        );
+        for (let i = 0; i < lines.length; i += 15) {
+          fields.push({ name: i === 0 ? label : `__${tierName} — ${cc.division_name} (cont.)__`, value: lines.slice(i, i + 15).join('\n'), inline: false });
+        }
+      }
+    }
+
+    // Show unassigned teams at the bottom
+    if (unassigned.length > 0) {
+      const lines = unassigned
+        .sort((a, b) => (a.team_name || '').localeCompare(b.team_name || ''))
+        .map(t => t.user_id
+          ? `🏈 **${t.team_name}** — <@${t.user_id}> (${t.star_rating || '?'}⭐)`
+          : `🟢 **${t.team_name}** — Available (${t.star_rating || '?'}⭐)`
+        );
+      for (let i = 0; i < lines.length; i += 15) {
+        fields.push({ name: i === 0 ? '__Unassigned__' : '__Unassigned (cont.)__', value: lines.slice(i, i + 15).join('\n'), inline: false });
+      }
+    }
+
+  } else {
+    // ── Standard conference display ─────────────────────────────────────────
+    const confMap = {};
+    for (const t of teams) {
+      const conf = t.conference || 'Independent';
+      if (!confMap[conf]) confMap[conf] = [];
+      confMap[conf].push(t);
+    }
+    for (const [conf, confTeams] of Object.entries(confMap).sort()) {
+      const lines = confTeams
+        .sort((a, b) => (a.team_name || '').localeCompare(b.team_name || ''))
+        .map(t => t.user_id
+          ? `🏈 **${t.team_name}** — <@${t.user_id}> (${t.star_rating || '?'}⭐)`
+          : `🟢 **${t.team_name}** — Available (${t.star_rating || '?'}⭐)`
+        );
+      for (let i = 0; i < lines.length; i += 15) {
+        fields.push({ name: i === 0 ? `__${conf}__` : `__${conf} (cont.)__`, value: lines.slice(i, i + 15).join('\n'), inline: false });
+      }
     }
   }
   if (fields.length === 0) return;
@@ -3591,6 +3709,267 @@ async function handleAddLeague(interaction) {
   );
 }
 
+// /conference-setup ───────────────────────────────────────────────────────
+async function handleConferenceSetup(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+  const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
+  if (!config.setup_complete) return replySetupRequired(interaction);
+  if (!config.feature_custom_conferences) return interaction.editReply({ content: '❌ Custom Conferences is not enabled. Turn it on in `/config features`.' });
+
+  let dm;
+  try { dm = await interaction.user.createDM(); }
+  catch { return interaction.editReply({ content: '❌ Could not open a DM. Please allow DMs from server members.' }); }
+  await interaction.editReply({ content: '📬 Check your DMs — conference setup wizard is starting.' });
+
+  const ask = async (prompt) => {
+    await dm.send(prompt);
+    try {
+      const collected = await dm.awaitMessages({ filter: m => m.author.id === interaction.user.id, max: 1, time: 120000, errors: ['time'] });
+      return collected.first().content.trim();
+    } catch { return null; }
+  };
+
+  const askButtons = async (prompt, buttons) => {
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 5) {
+      rows.push(new ActionRowBuilder().addComponents(
+        buttons.slice(i, i + 5).map(b => new ButtonBuilder()
+          .setCustomId(b.id).setLabel(b.label).setStyle(b.style || ButtonStyle.Secondary))
+      ));
+    }
+    const msg = await dm.send({ content: prompt, components: rows });
+    try {
+      const btn = await msg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
+      await btn.update({ components: [] });
+      return btn.customId;
+    } catch { await msg.edit({ components: [] }); return null; }
+  };
+
+  const league = await getLeagueFromInteraction(interaction);
+  const leagueId = league?.league_id || null;
+
+  // ── Auto-fill from existing team conferences ────────────────────────────
+  const existing = await getCustomConferences(guildId, leagueId);
+  const { data: distinctConfs } = await supabase
+    .from('teams').select('conference').neq('conference', 'FCS').order('conference');
+  const stdConfs = [...new Set((distinctConfs || []).map(t => t.conference).filter(Boolean))];
+
+  await dm.send(
+    `🏟️ **Conference Setup Wizard**\n\n` +
+    `This wizard lets you define custom tiers and divisions for your team list.\n\n` +
+    `**Example structure:**\n` +
+    `• Premier — East / West\n` +
+    `• Championship — East / West\n` +
+    `• League One — East / West\n\n` +
+    `${existing.length > 0 ? `You currently have **${existing.length}** conference slots configured.` : 'No custom conferences set up yet.'}`
+  );
+
+  // ── Step 1: Division names ─────────────────────────────────────────────
+  const divStr = await ask(
+    `**[Step 1]** What are your division names?\nEnter them comma-separated.\nExample: \`East, West\` or \`North, South\` or \`American, National\``
+  );
+  if (!divStr) return dm.send('⏰ Timed out — cancelled.');
+  const divisions = divStr.split(',').map(d => d.trim()).filter(Boolean);
+  if (divisions.length < 2) return dm.send('❌ Need at least 2 divisions. Cancelled.');
+
+  // ── Step 2: How many tiers? ────────────────────────────────────────────
+  const tierCountStr = await ask(`**[Step 2]** How many tiers do you want?\nExample: \`3\` (for Premier, Championship, League One)`);
+  if (!tierCountStr) return dm.send('⏰ Timed out — cancelled.');
+  const tierCount = parseInt(tierCountStr);
+  if (isNaN(tierCount) || tierCount < 1) return dm.send('❌ Invalid number. Cancelled.');
+
+  // ── Step 3: Name each tier ─────────────────────────────────────────────
+  const tierNames = [];
+  for (let i = 0; i < tierCount; i++) {
+    // Suggest a standard conference name as default
+    const suggestion = stdConfs[i] ? ` (suggestion: \`${stdConfs[i]}\`)` : '';
+    const name = await ask(`**[Step 3.${i + 1}]** Name for tier ${i + 1}${suggestion}\nThis is the top tier if it's tier 1.`);
+    if (!name) return dm.send('⏰ Timed out — cancelled.');
+    tierNames.push(name.trim());
+  }
+
+  // ── Confirm ────────────────────────────────────────────────────────────
+  const preview = tierNames.map((t, i) =>
+    divisions.map(d => `  • ${t} — ${d}`).join('\n')
+  ).join('\n');
+
+  const confirm = await askButtons(
+    `**Confirm Conference Structure:**\n\n${preview}\n\nThis will replace any existing custom conferences.`,
+    [
+      { id: 'confirm', label: '✅ Confirm', style: ButtonStyle.Success },
+      { id: 'cancel',  label: '❌ Cancel',  style: ButtonStyle.Secondary },
+    ]
+  );
+  if (!confirm || confirm === 'cancel') return dm.send('↩️ Cancelled.');
+
+  // ── Save ───────────────────────────────────────────────────────────────
+  // Clear existing
+  if (existing.length > 0) {
+    await supabase.from('custom_conferences').delete().eq('guild_id', guildId)
+      .eq('league_id', leagueId || '00000000-0000-0000-0000-000000000000');
+    // Also clear null league_id entries if single-league
+    if (!leagueId) await supabase.from('custom_conferences').delete().eq('guild_id', guildId).is('league_id', null);
+  }
+
+  for (let i = 0; i < tierNames.length; i++) {
+    for (const div of divisions) {
+      await upsertCustomConference(guildId, leagueId, tierNames[i], div, i + 1);
+    }
+  }
+
+  await dm.send(
+    `✅ **Conference structure saved!**\n\n${preview}\n\n` +
+    `Use \`/set-conference\` to assign teams to their tier and division.\n` +
+    `Use \`/promote-relegate\` to move teams between tiers each season.`
+  );
+
+  await postTeamList(interaction.guild, guildId, config);
+}
+
+// /set-conference ──────────────────────────────────────────────────────────
+async function handleSetConference(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId  = interaction.guildId;
+  const config   = await getConfig(guildId);
+  const isAdmin  = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
+  if (!config.feature_custom_conferences) return interaction.editReply({ content: '❌ Custom Conferences is not enabled.' });
+
+  const teamName = interaction.options.getString('team');
+  const tierName = interaction.options.getString('tier');
+  const divName  = interaction.options.getString('division');
+
+  const league   = await getLeagueFromInteraction(interaction);
+  const leagueId = league?.league_id || null;
+
+  // Find team
+  const { data: team } = await supabase.from('teams').select('id, team_name')
+    .ilike('team_name', teamName).maybeSingle();
+  if (!team) return interaction.editReply({ content: `❌ Team not found: **${teamName}**` });
+
+  // Find conference slot
+  const confs = await getCustomConferences(guildId, leagueId);
+  const slot = confs.find(c => c.tier_name.toLowerCase() === tierName.toLowerCase() && c.division_name.toLowerCase() === divName.toLowerCase());
+  if (!slot) return interaction.editReply({ content: `❌ No conference found for **${tierName} — ${divName}**. Run \`/conference-setup\` first.` });
+
+  await setTeamCustomConference(team.id, guildId, slot.id);
+  await interaction.editReply({ content: `✅ **${team.team_name}** assigned to **${slot.tier_name} — ${slot.division_name}**.` });
+  await postTeamList(interaction.guild, guildId, config);
+}
+
+// /promote-relegate ────────────────────────────────────────────────────────
+async function handlePromoteRelegate(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId  = interaction.guildId;
+  const config   = await getConfig(guildId);
+  const isAdmin  = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
+  if (!config.feature_custom_conferences) return interaction.editReply({ content: '❌ Custom Conferences is not enabled.' });
+
+  let dm;
+  try { dm = await interaction.user.createDM(); }
+  catch { return interaction.editReply({ content: '❌ Could not open a DM.' }); }
+  await interaction.editReply({ content: '📬 Check your DMs — promote/relegate wizard is starting.' });
+
+  const askButtons = async (prompt, buttons) => {
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 5) {
+      rows.push(new ActionRowBuilder().addComponents(
+        buttons.slice(i, i + 5).map(b => new ButtonBuilder()
+          .setCustomId(b.id).setLabel(b.label).setStyle(b.style || ButtonStyle.Secondary))
+      ));
+    }
+    const msg = await dm.send({ content: prompt, components: rows });
+    try {
+      const btn = await msg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
+      await btn.update({ components: [] });
+      return btn.customId;
+    } catch { await msg.edit({ components: [] }); return null; }
+  };
+
+  const league   = await getLeagueFromInteraction(interaction);
+  const leagueId = league?.league_id || null;
+  const confs    = await getCustomConferences(guildId, leagueId);
+  if (!confs.length) return dm.send('❌ No custom conferences set up. Run `/conference-setup` first.');
+
+  // ── Step 1: Pick direction ─────────────────────────────────────────────
+  const direction = await askButtons(
+    '⬆️ **Promote/Relegate Wizard**\n\nAre you promoting or relegating a team?',
+    [
+      { id: 'promote', label: '⬆️ Promote', style: ButtonStyle.Success },
+      { id: 'relegate', label: '⬇️ Relegate', style: ButtonStyle.Danger },
+    ]
+  );
+  if (!direction) return dm.send('⏰ Timed out — cancelled.');
+
+  // ── Step 2: Pick team from assigned teams ──────────────────────────────
+  const { data: assignments } = await supabase
+    .from('team_assignments')
+    .select('team_id, custom_conference_id, teams(team_name), custom_conferences(tier_name, division_name, position)')
+    .eq('guild_id', guildId)
+    .not('custom_conference_id', 'is', null);
+
+  if (!assignments?.length) return dm.send('❌ No teams are assigned to custom conferences yet.');
+
+  // Filter to teams that CAN move in the chosen direction
+  const tierPositions = [...new Set(confs.map(c => c.position))].sort((a, b) => a - b);
+  const minPos = Math.min(...tierPositions);
+  const maxPos = Math.max(...tierPositions);
+
+  const moveable = assignments.filter(a => {
+    const pos = a.custom_conferences?.position;
+    if (direction === 'promote') return pos > minPos;
+    return pos < maxPos;
+  });
+
+  if (!moveable.length) return dm.send(`❌ No teams can be ${direction === 'promote' ? 'promoted' : 'relegated'} further.`);
+
+  // Show teams as buttons
+  const teamButtons = moveable.slice(0, 20).map(a => ({
+    id: `team_${a.team_id}`,
+    label: `${a.teams?.team_name} (${a.custom_conferences?.tier_name} ${a.custom_conferences?.division_name})`,
+  }));
+
+  const teamPick = await askButtons('Which team?', teamButtons);
+  if (!teamPick) return dm.send('⏰ Timed out — cancelled.');
+  const teamId = parseInt(teamPick.replace('team_', ''));
+  const assignment = moveable.find(a => a.team_id === teamId);
+  const currentConf = assignment.custom_conferences;
+
+  // Find target tier
+  const currentPos  = currentConf.position;
+  const targetPos   = direction === 'promote' ? currentPos - 1 : currentPos + 1;
+  const targetConf  = confs.find(c => c.position === targetPos && c.division_name === currentConf.division_name);
+
+  if (!targetConf) return dm.send(`❌ No ${currentConf.division_name} division found at tier ${targetPos}.`);
+
+  // ── Confirm ────────────────────────────────────────────────────────────
+  const verb    = direction === 'promote' ? 'Promoted' : 'Relegated';
+  const confirm = await askButtons(
+    `**Confirm:** ${verb} **${assignment.teams?.team_name}**\n` +
+    `From: **${currentConf.tier_name} — ${currentConf.division_name}**\n` +
+    `To: **${targetConf.tier_name} — ${targetConf.division_name}**`,
+    [
+      { id: 'confirm', label: `✅ ${verb}`, style: direction === 'promote' ? ButtonStyle.Success : ButtonStyle.Danger },
+      { id: 'cancel',  label: '❌ Cancel',  style: ButtonStyle.Secondary },
+    ]
+  );
+  if (!confirm || confirm === 'cancel') return dm.send('↩️ Cancelled.');
+
+  await setTeamCustomConference(teamId, guildId, targetConf.id);
+
+  await dm.send(
+    `✅ **${verb}!**\n` +
+    `**${assignment.teams?.team_name}** moved to **${targetConf.tier_name} — ${targetConf.division_name}**.`
+  );
+
+  await postTeamList(interaction.guild, guildId, config);
+  console.log(`[conference] ${verb} team ${teamId} from pos ${currentPos} to ${targetPos} in guild ${guildId}`);
+}
+
 // /reset-league ───────────────────────────────────────────────────────────
 async function handleResetLeague(interaction) {
   await interaction.deferReply({ flags: 64 });
@@ -4216,6 +4595,23 @@ async function handleAutocomplete(interaction) {
       }));
     }
 
+  } else if (commandName === 'set-conference') {
+    const guildId = interaction.guildId;
+    const focused = interaction.options.getFocused(true);
+    if (focused.name === 'team') {
+      const { data: teams } = await supabase.from('teams').select('team_name')
+        .ilike('team_name', `%${query}%`).order('team_name').limit(25);
+      choices = (teams || []).map(t => ({ name: t.team_name, value: t.team_name }));
+    } else if (focused.name === 'tier') {
+      const confs = await getCustomConferences(guildId);
+      const tiers = [...new Set(confs.map(c => c.tier_name))].filter(t => t.toLowerCase().includes(query));
+      choices = tiers.map(t => ({ name: t, value: t }));
+    } else if (focused.name === 'division') {
+      const confs = await getCustomConferences(guildId);
+      const divs = [...new Set(confs.map(c => c.division_name))].filter(d => d.toLowerCase().includes(query));
+      choices = divs.map(d => ({ name: d, value: d }));
+    }
+
   } else if (commandName === 'advance') {
     // Always load fresh config so intervals reflect latest settings
     try {
@@ -4338,6 +4734,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'reload-commands':    return handleReloadCommands(interaction);
         case 'rollback-advance':   return handleRollbackAdvance(interaction);
         case 'reset-league':        return handleResetLeague(interaction);
+        case 'conference-setup':    return handleConferenceSetup(interaction);
+        case 'set-conference':      return handleSetConference(interaction);
+        case 'promote-relegate':    return handlePromoteRelegate(interaction);
         case 'league-list':         return handleLeagueList(interaction);
         case 'add-league':          return handleAddLeague(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
