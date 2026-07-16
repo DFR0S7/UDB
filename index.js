@@ -5010,6 +5010,19 @@ client.once(Events.ClientReady, async (c) => {
   expireJobOffers();
   setInterval(expireJobOffers, 30 * 60 * 1000);
 
+  // ── Supabase keep-alive ping ───────────────────────────────────────────
+  // Runs once at startup then every 24 hours to prevent Supabase pausing due to inactivity
+  const pingSupabase = async () => {
+    try {
+      await supabase.from('config').select('guild_id').limit(1);
+      console.log('[supabase] Keep-alive ping successful');
+    } catch (err) {
+      console.error('[supabase] Keep-alive ping failed:', err.message);
+    }
+  };
+  await pingSupabase();
+  setInterval(pingSupabase, 24 * 60 * 60 * 1000);
+
   // ── Shard watchdog ────────────────────────────────────────────────────
   // If the WebSocket ping goes stale (shard zombie), force-exit so Render restarts cleanly.
   setInterval(() => {
