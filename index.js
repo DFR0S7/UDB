@@ -718,9 +718,10 @@ function buildCommands() {
         .setDescription('Filter teams (overrides server default for this view)')
         .setRequired(false)
         .addChoices(
-          { name: '👥 All Teams',      value: 'all' },
-          { name: '🏈 Assigned Only',  value: 'assigned' },
-          { name: '🟢 Available Only', value: 'available' },
+          { name: '👥 All Teams',           value: 'all' },
+          { name: '🏈 Assigned Only',       value: 'assigned' },
+          { name: '🟢 Available Only',      value: 'available' },
+          { name: '🏟️ Conference View',     value: 'conference_view' },
         )),
 
     new SlashCommandBuilder()
@@ -2656,12 +2657,18 @@ async function postTeamList(guild, guildId, config, filterOverride = null) {
   let teams = allTeams.filter(t => t.user_id || (t.star_rating != null && parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating));
   if (filter === 'assigned')  teams = teams.filter(t => t.user_id);
   if (filter === 'available') teams = teams.filter(t => !t.user_id);
+  // conference_view shows all teams within their tier structure — handled in display block below
 
   const fields = [];
 
   if (config.feature_custom_conferences) {
     // ── Custom tier/division display ────────────────────────────────────────
     const customConfs = await getCustomConferences(guildId);
+
+    // For conference_view: use all teams regardless of filter so every slot shows
+    const displayTeams = filter === 'conference_view' ? allTeams.filter(t =>
+      t.user_id || (t.star_rating != null && parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating)
+    ) : teams;
 
     // Build a map of custom_conference_id -> teams
     const confTeamMap = {};
@@ -2670,7 +2677,7 @@ async function postTeamList(guild, guildId, config, filterOverride = null) {
     // Unassigned to any custom conference
     const unassigned = [];
 
-    for (const t of teams) {
+    for (const t of displayTeams) {
       if (t.custom_conference_id && confTeamMap[t.custom_conference_id] !== undefined) {
         confTeamMap[t.custom_conference_id].push(t);
       } else {
@@ -2744,7 +2751,11 @@ async function postTeamList(guild, guildId, config, filterOverride = null) {
   for (let i = 0; i < fields.length; i += PAGE) {
     embeds.push(new EmbedBuilder()
       .setTitle(i === 0
-          ? `📋 Team Availability — ${config.league_name}${filter === 'assigned' ? ' (Assigned)' : filter === 'available' ? ' (Available)' : ''}`
+          ? `📋 Team Availability — ${config.league_name}${
+              filter === 'assigned'        ? ' (Assigned)'        :
+              filter === 'available'       ? ' (Available)'       :
+              filter === 'conference_view' ? ' (Conference View)' : ''
+            }`
           : `📋 Team Availability (cont.)`)
       .setColor(config.embed_color_primary_int || 0x1e90ff)
       .setDescription(i === 0 ? `**${config.league_abbreviation || config.league_name}** · Updated <t:${Math.floor(Date.now()/1000)}:R>` : null)
@@ -4599,7 +4610,7 @@ async function handleAutocomplete(interaction) {
       { label: 'Team Lists Channel',      key: 'channel_team_lists',         hint: 'Channel for team availability list' },
       { label: 'Signed Coaches Channel',  key: 'channel_signed_coaches',     hint: 'Channel for signing announcements' },
       { label: 'Streaming Channel',       key: 'channel_streaming',          hint: 'Channel to monitor for stream links' },
-      { label: 'Team List Filter',         key: 'team_list_filter',           hint: 'Default filter for team list: all, assigned, or available' },
+      { label: 'Team List Filter',         key: 'team_list_filter',           hint: 'Default filter: all, assigned, available, or conference_view' },
       { label: 'Head Coach Role',         key: 'role_head_coach',            hint: 'Role assigned to coaches' },
 
       { label: 'Min Star Rating',         key: 'star_rating_for_offers',     hint: 'Minimum star rating for job offers' },
@@ -4648,9 +4659,10 @@ async function handleAutocomplete(interaction) {
 
     } else if (setting === 'team_list_filter') {
       choices = [
-        { name: '👥 All Teams',       value: 'all' },
-        { name: '🏈 Assigned Only',   value: 'assigned' },
-        { name: '🟢 Available Only',  value: 'available' },
+        { name: '👥 All Teams',           value: 'all' },
+        { name: '🏈 Assigned Only',       value: 'assigned' },
+        { name: '🟢 Available Only',      value: 'available' },
+        { name: '🏟️ Conference View',     value: 'conference_view' },
       ].filter(c => c.name.toLowerCase().includes(query) || c.value.includes(query));
 
     } else if (setting === 'advance_intervals') {
