@@ -281,16 +281,6 @@ function starRating(rating) {
 }
 
 // Post an embed to a channel, logging a warning if the channel isn't found
-async function postToChannel(guild, channelName, payload) {
-  const ch = findTextChannel(guild, channelName);
-  if (!ch) {
-    console.warn(`[post] Channel not found: "${channelName}"`);
-    return null;
-  }
-  await ch.send(payload);
-  return ch;
-}
-
 // =====================================================
 // SUPABASE HELPERS
 // =====================================================
@@ -832,11 +822,10 @@ function buildCommands() {
 
     new SlashCommandBuilder()
       .setName('set-conference')
-      .setDescription('[Admin] Assign a team to a custom tier and division.')
+      .setDescription('[Admin] Assign a team to a custom conference.')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
-      .addStringOption(o => o.setName('tier').setDescription('Tier name (e.g. Premier)').setRequired(true).setAutocomplete(true))
-      .addStringOption(o => o.setName('division').setDescription('Division name (e.g. East)').setRequired(true).setAutocomplete(true)),
+      .addStringOption(o => o.setName('conference').setDescription('Conference name (e.g. SEC, B10)').setRequired(true).setAutocomplete(true)),
 
     new SlashCommandBuilder()
       .setName('promote-relegate')
@@ -1336,12 +1325,7 @@ async function handleSetup(interaction) {
 
   await dm.send('**— Feature Setup —**\nConfigure each feature group one at a time. Nothing is on by default — enable only what you need.');
 
-  const gameDayCmds = [
-    { label: 'Game Result',           id: 'feature_game_result' },
-    { label: 'Any Game Result',       id: 'feature_any_game_result' },
-    { label: 'Ranking',               id: 'feature_ranking' },
-    { label: 'All-Time Ranking',      id: 'feature_ranking_all_time' },
-  ];
+
   const teamCmds = [
     { label: 'Job Offers',  id: 'feature_job_offers' },
     { label: 'Assign Team', id: 'feature_assign_team' },
@@ -1359,9 +1343,6 @@ async function handleSetup(interaction) {
     { label: '↳ Promotion/Relegation', id: 'feature_promotion_relegation' },
   ];
 
-  if (leagueType === 'established') await dm.send('💡 **Game Day — Recommendation:** Enable this if you want coaches to record game results. You can always turn it on later via `/config features`.');
-  const gameDayEnabled   = await askGroupFeatures('Game Day',           '🏈', gameDayCmds);
-  if (gameDayEnabled === null) return;
   if (leagueType === 'established') await dm.send('💡 **Team Selection — Recommendation:** Enable **Assign Team** to map existing coaches to their teams directly. You likely won\'t need Job Offers unless you\'re still growing.');
   else await dm.send('💡 **Team Selection — Recommendation:** Enable **Job Offers** so coaches can request and accept teams through the bot.');
   const teamEnabled      = await askGroupFeatures('Team Selection',     '👥', teamCmds);
@@ -1371,13 +1352,9 @@ async function handleSetup(interaction) {
   const streamingEnabled = await askGroupFeatures('Autopost Streams (Wamellow)', '📡', streamingCmds);
   if (streamingEnabled === null) return;
 
-  const allEnabled = [...gameDayEnabled, ...teamEnabled, ...advanceEnabled, ...streamingEnabled];
+  const allEnabled = [...teamEnabled, ...advanceEnabled, ...streamingEnabled];
 
   const features = {
-    feature_game_result:           allEnabled.includes('feature_game_result'),
-    feature_any_game_result:       allEnabled.includes('feature_any_game_result'),
-    feature_ranking:               allEnabled.includes('feature_ranking'),
-    feature_ranking_all_time:      allEnabled.includes('feature_ranking_all_time'),
     feature_job_offers:            allEnabled.includes('feature_job_offers'),
     feature_assign_team:           allEnabled.includes('feature_assign_team'),
     feature_reset_team:            allEnabled.includes('feature_reset_team'),
@@ -1399,7 +1376,7 @@ async function handleSetup(interaction) {
     channel_streaming:       'streaming',
   };
 
-  const needsNewsFeed  = features.feature_ranking || features.feature_ranking_all_time || features.feature_game_result;
+  const needsNewsFeed  = false; // News feed no longer driven by feature flags — always available if channel is set
   const needsSigned    = features.feature_job_offers || features.feature_assign_team;
   const needsTeamList  = features.feature_list_teams;
   const needsAdvance   = features.feature_advance;
@@ -1774,7 +1751,6 @@ async function handleConfigView(interaction) {
       { name: '🆔 Guild ID',     value: config.guild_id,                         inline: true },
       { name: '\u200b',          value: '\u200b',                                 inline: true },
       { name: '🔧 Features', value:
-        `🏈 ${config.feature_game_result ? '✅' : '❌'} Game Result  ${config.feature_any_game_result ? '✅' : '❌'} Any Game Result\n` +
         `👥 ${config.feature_job_offers ? '✅' : '❌'} Job Offers  ${config.feature_assign_team ? '✅' : '❌'} Assign  ${config.feature_reset_team ? '✅' : '❌'} Reset  ${config.feature_list_teams ? '✅' : '❌'} List  ${config.feature_move_coach ? '✅' : '❌'} Move\n` +
         `📅 ${config.feature_advance ? '✅' : '❌'} Advance\n` +
         `📡 ${config.feature_stream_autopost ? '✅' : '❌'} Streamer Register  ${config.feature_streaming_list ? '✅' : '❌'} Streamer List`,
@@ -1801,16 +1777,7 @@ async function handleConfigView(interaction) {
 // /config features ────────────────────────────────────
 // Feature groups definition (shared by /config features handler + select menu handler)
 const FEATURE_GROUPS = [
-  {
-    key:   'game_day',
-    label: '🏈 Game Day',
-    commands: [
-      { id: 'feature_game_result',           label: 'Game Result',           desc: 'Coaches submit their own game results' },
-      { id: 'feature_any_game_result',        label: 'Any Game Result',       desc: 'Admin enters results for any two teams' },
-      { id: 'feature_ranking',               label: 'Ranking',               desc: 'Season standings' },
-      { id: 'feature_ranking_all_time',      label: 'All-Time Ranking',      desc: 'All-time win/loss records' },
-    ],
-  },
+
   {
     key:   'team_selection',
     label: '👥 Team Selection',
@@ -2625,21 +2592,10 @@ async function upsertCustomConference(guildId, leagueId, tierName, divisionName,
   return data;
 }
 
-async function deleteCustomConference(id) {
-  await supabase.from('custom_conferences').delete().eq('id', id);
-}
-
 async function setTeamCustomConference(teamId, guildId, customConferenceId) {
   await supabase.from('team_assignments')
     .update({ custom_conference_id: customConferenceId })
     .eq('team_id', teamId).eq('guild_id', guildId);
-}
-
-async function getTeamCustomConference(teamId, guildId) {
-  const { data } = await supabase.from('team_assignments')
-    .select('custom_conference_id, custom_conferences(*)')
-    .eq('team_id', teamId).eq('guild_id', guildId).maybeSingle();
-  return data?.custom_conferences || null;
 }
 
 async function postTeamList(guild, guildId, config, filterOverride = null) {
@@ -3810,22 +3766,18 @@ async function handleSetConference(interaction) {
   if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
   if (!config.feature_custom_conferences) return interaction.editReply({ content: '❌ Custom Conferences is not enabled.' });
 
-  const teamName = interaction.options.getString('team');
-  const tierName = interaction.options.getString('tier');
-  const divName  = interaction.options.getString('division');
-
-  const league   = await getLeagueFromInteraction(interaction);
-  const leagueId = league?.league_id || null;
+  const teamName     = interaction.options.getString('team');
+  const conferenceId = interaction.options.getString('conference');
 
   // Find team
   const { data: team } = await supabase.from('teams').select('id, team_name')
     .ilike('team_name', teamName).maybeSingle();
   if (!team) return interaction.editReply({ content: `❌ Team not found: **${teamName}**` });
 
-  // Find conference slot
-  const confs = await getCustomConferences(guildId, leagueId);
-  const slot = confs.find(c => c.tier_name.toLowerCase() === tierName.toLowerCase() && c.division_name.toLowerCase() === divName.toLowerCase());
-  if (!slot) return interaction.editReply({ content: `❌ No conference found for **${tierName} — ${divName}**. Run \`/conference-setup\` first.` });
+  // Look up the conference slot directly by ID
+  const { data: slot } = await supabase.from('custom_conferences')
+    .select('*').eq('id', conferenceId).maybeSingle();
+  if (!slot) return interaction.editReply({ content: `❌ Conference not found. Run \`/conference-setup\` first.` });
 
   await setTeamCustomConference(team.id, guildId, slot.id);
   await interaction.editReply({ content: `✅ **${team.team_name}** assigned to **${slot.tier_name} — ${slot.division_name}**.` });
@@ -3879,11 +3831,13 @@ async function handlePromoteRelegate(interaction) {
   if (!direction) return dm.send('⏰ Timed out — cancelled.');
 
   // ── Step 2: Pick team from assigned teams ──────────────────────────────
-  const { data: assignments } = await supabase
+  let assignQuery = supabase
     .from('team_assignments')
     .select('team_id, custom_conference_id, teams(team_name), custom_conferences(tier_name, division_name, position)')
     .eq('guild_id', guildId)
     .not('custom_conference_id', 'is', null);
+  if (leagueId) assignQuery = assignQuery.eq('league_id', leagueId);
+  const { data: assignments } = await assignQuery;
 
   if (!assignments?.length) return dm.send('❌ No teams are assigned to custom conferences yet.');
 
@@ -3894,30 +3848,40 @@ async function handlePromoteRelegate(interaction) {
 
   const moveable = assignments.filter(a => {
     const pos = a.custom_conferences?.position;
+    if (pos == null) return false;
     if (direction === 'promote') return pos > minPos;
     return pos < maxPos;
   });
 
   if (!moveable.length) return dm.send(`❌ No teams can be ${direction === 'promote' ? 'promoted' : 'relegated'} further.`);
 
-  // Show teams as buttons
-  const teamButtons = moveable.slice(0, 20).map(a => ({
-    id: `team_${a.team_id}`,
-    label: `${a.teams?.team_name} (${a.custom_conferences?.tier_name} ${a.custom_conferences?.division_name})`,
-  }));
+  // Show teams as buttons — cap at 24 to leave room within Discord's 5-row limit
+  const teamButtons = moveable.slice(0, 24).map(a => {
+    const teamName = a.teams?.team_name || 'Unknown';
+    const confName = a.custom_conferences?.tier_name || '';
+    const divName  = a.custom_conferences?.division_name || '';
+    const rawLabel = `${teamName} (${confName} ${divName})`;
+    return {
+      id:    `team_${a.team_id}`,
+      label: rawLabel.slice(0, 80), // Discord button label max
+    };
+  });
 
   const teamPick = await askButtons('Which team?', teamButtons);
   if (!teamPick) return dm.send('⏰ Timed out — cancelled.');
-  const teamId = parseInt(teamPick.replace('team_', ''));
-  const assignment = moveable.find(a => a.team_id === teamId);
+
+  // Use string comparison to safely match team_id regardless of int/string type
+  const pickedId   = teamPick.replace('team_', '');
+  const assignment = moveable.find(a => String(a.team_id) === pickedId);
+  if (!assignment) return dm.send('❌ Could not find that team — please try again.');
   const currentConf = assignment.custom_conferences;
 
-  // Find target tier
-  const currentPos  = currentConf.position;
-  const targetPos   = direction === 'promote' ? currentPos - 1 : currentPos + 1;
-  const targetConf  = confs.find(c => c.position === targetPos && c.division_name === currentConf.division_name);
+  // Find target tier — match by position and division within the league-filtered confs
+  const currentPos = currentConf.position;
+  const targetPos  = direction === 'promote' ? currentPos - 1 : currentPos + 1;
+  const targetConf = confs.find(c => c.position === targetPos && c.division_name === currentConf.division_name);
 
-  if (!targetConf) return dm.send(`❌ No ${currentConf.division_name} division found at tier ${targetPos}.`);
+  if (!targetConf) return dm.send(`❌ No **${currentConf.division_name}** division found at the ${direction === 'promote' ? 'tier above' : 'tier below'}. Check your conference structure with \`/conference-setup\`.`);
 
   // ── Confirm ────────────────────────────────────────────────────────────
   const verb    = direction === 'promote' ? 'Promoted' : 'Relegated';
@@ -4581,12 +4545,13 @@ async function handleAutocomplete(interaction) {
       const { data: teams } = await supabase.from('teams').select('team_name')
         .ilike('team_name', `%${query}%`).order('team_name').limit(25);
       choices = (teams || []).map(t => ({ name: t.team_name, value: t.team_name }));
-    } else if (focused.name === 'tier') {
-      const tiers = [...new Set(confs.map(c => c.tier_name))].filter(t => t.toLowerCase().includes(query));
-      choices = tiers.map(t => ({ name: t, value: t }));
-    } else if (focused.name === 'division') {
-      const divs = [...new Set(confs.map(c => c.division_name))].filter(d => d.toLowerCase().includes(query));
-      choices = divs.map(d => ({ name: d, value: d }));
+    } else if (focused.name === 'conference') {
+      // Each conference name is unique (tier_name includes division context)
+      // Show as "SEC (East)" so admin knows which division it maps to
+      choices = confs
+        .filter(c => c.tier_name.toLowerCase().includes(query) || c.division_name.toLowerCase().includes(query))
+        .map(c => ({ name: `${c.tier_name} (${c.division_name})`, value: c.id }))
+        .slice(0, 25);
     }
 
   } else if (commandName === 'advance') {
