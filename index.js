@@ -158,6 +158,7 @@ const CONFIG_DEFAULTS = {
   channel_news_feed:            'news-feed',
   channel_advance_tracker:      'advance-tracker',
   channel_team_lists:           'team-lists',
+  team_list_filter:             'all',   // 'all' | 'assigned' | 'available' — saved via /config edit team_list_filter
   channel_signed_coaches:       'signed-coaches',
   channel_streaming:            'streaming',
   // ── Roles ─────────────────────────────────────
@@ -711,7 +712,16 @@ function buildCommands() {
     new SlashCommandBuilder()
       .setName('listteams')
       .setDescription('Post the team availability list (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addStringOption(o => o
+        .setName('filter')
+        .setDescription('Filter teams (overrides server default for this view)')
+        .setRequired(false)
+        .addChoices(
+          { name: '👥 All Teams',      value: 'all' },
+          { name: '🏈 Assigned Only',  value: 'assigned' },
+          { name: '🟢 Available Only', value: 'available' },
+        )),
 
     new SlashCommandBuilder()
       .setName('advance')
@@ -2556,7 +2566,7 @@ async function handleResetTeam(interaction) {
     .setTimestamp();
 
   if (announceTarget) await announceTarget.send({ embeds: [releaseEmbed] }).catch(() => {});
-  await postTeamList(interaction.guild, guildId, config).catch(() => {});
+  await postTeamList(interaction.guild, guildId, config, filterOverride).catch(() => {});
 
   await interaction.editReply({ content: `✅ **${team.team_name}** has been reset and is now available.${roleWarning}` });
 }
@@ -2568,8 +2578,9 @@ async function handleListTeams(interaction) {
   const config  = await getConfig(guildId);
   if (!config.setup_complete) return interaction.editReply({ content: '⚙️ **Setup Required**\nRun `/setup` to configure the bot before using this command.' });
   if (!config.feature_list_teams) return interaction.editReply({ content: '❌ Team listing is disabled on this server.' });
-  const league  = await getLeagueFromInteraction(interaction);
+  const league        = await getLeagueFromInteraction(interaction);
   if (!league) return replyNoLeague(interaction);
+  const filterOverride = interaction.options.getString('filter') || null;
 
   let allTeams;
   try {
@@ -2711,7 +2722,7 @@ async function getTeamCustomConference(teamId, guildId) {
   return data?.custom_conferences || null;
 }
 
-async function postTeamList(guild, guildId, config) {
+async function postTeamList(guild, guildId, config, filterOverride = null) {
   if (!config.feature_list_teams) return;
   const listsChannel = findTextChannel(guild, config.channel_team_lists);
   if (!listsChannel) return;
@@ -2721,7 +2732,12 @@ async function postTeamList(guild, guildId, config) {
 
   const minRating = config.star_rating_for_offers     || 0;
   const maxRating = config.star_rating_max_for_offers || 999;
-  const teams = allTeams.filter(t => t.user_id || (t.star_rating != null && parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating));
+  const filter    = filterOverride || config.team_list_filter || 'all';
+
+  // Apply filter
+  let teams = allTeams.filter(t => t.user_id || (t.star_rating != null && parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating));
+  if (filter === 'assigned')  teams = teams.filter(t => t.user_id);
+  if (filter === 'available') teams = teams.filter(t => !t.user_id);
 
   const fields = [];
 
@@ -2809,7 +2825,9 @@ async function postTeamList(guild, guildId, config) {
   const embeds = [];
   for (let i = 0; i < fields.length; i += PAGE) {
     embeds.push(new EmbedBuilder()
-      .setTitle(i === 0 ? `📋 Team Availability — ${config.league_name}` : `📋 Team Availability (cont.)`)
+      .setTitle(i === 0
+          ? `📋 Team Availability — ${config.league_name}${filter === 'assigned' ? ' (Assigned)' : filter === 'available' ? ' (Available)' : ''}`
+          : `📋 Team Availability (cont.)`)
       .setColor(config.embed_color_primary_int || 0x1e90ff)
       .setDescription(i === 0 ? `**${config.league_abbreviation || config.league_name}** · Updated <t:${Math.floor(Date.now()/1000)}:R>` : null)
       .addFields(fields.slice(i, i + PAGE))
@@ -4663,6 +4681,7 @@ async function handleAutocomplete(interaction) {
       { label: 'Team Lists Channel',      key: 'channel_team_lists',         hint: 'Channel for team availability list' },
       { label: 'Signed Coaches Channel',  key: 'channel_signed_coaches',     hint: 'Channel for signing announcements' },
       { label: 'Streaming Channel',       key: 'channel_streaming',          hint: 'Channel to monitor for stream links' },
+      { label: 'Team List Filter',         key: 'team_list_filter',           hint: 'Default filter for team list: all, assigned, or available' },
       { label: 'Head Coach Role',         key: 'role_head_coach',            hint: 'Role assigned to coaches' },
 
       { label: 'Min Star Rating',         key: 'star_rating_for_offers',     hint: 'Minimum star rating for job offers' },
@@ -4708,6 +4727,13 @@ async function handleAutocomplete(interaction) {
     } else if (setting === 'job_offers_count') {
       choices = ['1','2','3','4','5']
         .filter(v => v.includes(query)).map(v => ({ name: `${v} offers`, value: v }));
+
+    } else if (setting === 'team_list_filter') {
+      choices = [
+        { name: '👥 All Teams',       value: 'all' },
+        { name: '🏈 Assigned Only',   value: 'assigned' },
+        { name: '🟢 Available Only',  value: 'available' },
+      ].filter(c => c.name.toLowerCase().includes(query) || c.value.includes(query));
 
     } else if (setting === 'advance_intervals') {
       choices = ['[24, 48]','[12, 24, 48]','[24]','[48]','[6, 12, 24, 48]']
