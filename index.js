@@ -2676,11 +2676,20 @@ async function getCustomConferences(guildId, leagueId = null) {
 }
 
 async function upsertCustomConference(guildId, leagueId, tierName, divisionName, position) {
+  // Delete existing entry first to avoid NULL conflict key issues (NULL != NULL in Postgres)
+  let delQ = supabase.from('custom_conferences')
+    .delete()
+    .eq('guild_id', guildId)
+    .eq('tier_name', tierName)
+    .eq('division_name', divisionName);
+  if (leagueId) delQ = delQ.eq('league_id', leagueId);
+  else delQ = delQ.is('league_id', null);
+  await delQ;
+
+  // Insert fresh
   const { data, error } = await supabase.from('custom_conferences')
-    .upsert(
-      { guild_id: guildId, league_id: leagueId, tier_name: tierName, division_name: divisionName, position },
-      { onConflict: 'guild_id,league_id,tier_name,division_name' }
-    ).select().single();
+    .insert({ guild_id: guildId, league_id: leagueId || null, tier_name: tierName, division_name: divisionName, position })
+    .select().single();
   if (error) throw error;
   return data;
 }
@@ -3824,10 +3833,15 @@ async function handleConferenceSetup(interaction) {
     if (!leagueId) await supabase.from('custom_conferences').delete().eq('guild_id', guildId).is('league_id', null);
   }
 
-  for (const slot of tierSlots) {
-    for (const div of divisions) {
-      await upsertCustomConference(guildId, leagueId, slot.names[div], div, slot.position);
+  try {
+    for (const slot of tierSlots) {
+      for (const div of divisions) {
+        await upsertCustomConference(guildId, leagueId, slot.names[div], div, slot.position);
+      }
     }
+  } catch (err) {
+    console.error('[conference-setup] Save error:', err.message);
+    return dm.send(`❌ **Failed to save conference structure:** ${err.message}`);
   }
 
   await dm.send(
