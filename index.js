@@ -374,8 +374,9 @@ async function getAllTeams(guildId, leagueId = null) {
 
   return teams.map(t => ({
     ...t,
-    user_id:       assignMap[t.id]?.user_id || null,
-    assignment_id: assignMap[t.id]?.id      || null,
+    user_id:              assignMap[t.id]?.user_id              || null,
+    assignment_id:        assignMap[t.id]?.id                  || null,
+    custom_conference_id: assignMap[t.id]?.custom_conference_id || null,
   }));
 }
 
