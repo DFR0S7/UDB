@@ -2644,15 +2644,29 @@ async function postTeamList(guild, guildId, config, filterOverride = null) {
 
     // Group by tier position, then list each division
     const tierPositions = [...new Set(customConfs.map(cc => cc.position))].sort((a, b) => a - b);
+    const maxPos = tierPositions.length > 0 ? tierPositions[tierPositions.length - 1] : null;
 
     for (const pos of tierPositions) {
       const divisionsAtTier = customConfs.filter(cc => cc.position === pos);
+      const isBottomTier = pos === maxPos;
+
       for (const cc of divisionsAtTier) {
         // Use each conference's own tier_name — East and West can have different names
         const label = `__${cc.tier_name} — ${cc.division_name}__`;
-        const confTeams = (confTeamMap[cc.id] || [])
-          .sort((a, b) => (a.team_name || '').localeCompare(b.team_name || ''));
+
+        // For assigned filter: bottom tier also shows available teams so openings are visible
+        let confTeams;
+        if (filter === 'assigned' && isBottomTier) {
+          // Show all teams in bottom tier (assigned + available)
+          confTeams = (displayTeams.filter(t => t.custom_conference_id === cc.id))
+            .sort((a, b) => (a.team_name || '').localeCompare(b.team_name || ''));
+        } else {
+          confTeams = (confTeamMap[cc.id] || [])
+            .sort((a, b) => (a.team_name || '').localeCompare(b.team_name || ''));
+        }
         if (confTeams.length === 0) {
+          // Hide empty conferences when filter is assigned-only or conference_view with no assigned teams
+          if (filter === 'assigned') continue;
           fields.push({ name: label, value: '*No teams assigned*', inline: false });
           continue;
         }
@@ -2882,24 +2896,9 @@ async function handleAdvance(interaction) {
   const phaseLabel = formatPhase(newPhase, newSub);
   const deadline   = new Date(Date.now() + hours * 60 * 60 * 1000);
 
-  const TZ_MAP = {
-    ET:   { label: '🌴 ET',   iana: 'America/New_York'    },
-    CT:   { label: '🐄 CT',   iana: 'America/Chicago'     },
-    MT:   { label: '🏔️ MT',   iana: 'America/Denver'      },
-    PT:   { label: '🌊 PT',   iana: 'America/Los_Angeles' },
-    GMT:  { label: '🌐 GMT',  iana: 'Europe/London'       },
-    AEST: { label: '🦘 AEST', iana: 'Australia/Sydney'    },
-    NZST: { label: '🥝 NZST', iana: 'Pacific/Auckland'    },
-  };
-
-  const formatTZ = (date, iana) =>
-    date.toLocaleString('en-US', { timeZone: iana, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
-
-  const configuredTZs = config.advance_timezones_parsed || ['ET','CT','MT','PT'];
-  const deadlineLines = configuredTZs
-    .filter(k => TZ_MAP[k])
-    .map(k => `${TZ_MAP[k].label}: **${formatTZ(deadline, TZ_MAP[k].iana)}**`)
-    .join('\n');
+  // Discord dynamic timestamp — renders in each user's own local timezone automatically
+  const unixTimestamp = Math.floor(deadline.getTime() / 1000);
+  const deadlineLines = `<t:${unixTimestamp}:f> (<t:${unixTimestamp}:R>)`;
 
   // Mention @head-coach role on public announcement if it exists, else @everyone
   const headCoachRoleName = (config.role_head_coach || 'head coach').trim();
