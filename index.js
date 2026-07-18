@@ -2582,91 +2582,9 @@ async function handleListTeams(interaction) {
   if (!league) return replyNoLeague(interaction);
   const filterOverride = interaction.options.getString('filter') || null;
 
-  let allTeams;
-  try {
-    allTeams = await getAllTeams(guildId, league.league_id);
-  } catch (err) {
-    return interaction.editReply(`❌ **Database Error**\nCouldn't load teams: ${err.message}\n\nCheck your Supabase connection and ensure the \`teams\` table exists and has data.`);
-  }
-
-  const minRating = config.star_rating_for_offers     || 0;
-  const maxRating = config.star_rating_max_for_offers || 999;
-
-  // Always show taken teams; only show available teams within the configured range
-  const teams = allTeams.filter(t => t.user_id || (t.star_rating != null && parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating));
-
-  // Group by conference
-  const confMap = {};
-  for (const t of teams) {
-    const conf = t.conference || 'Independent';
-    if (!confMap[conf]) confMap[conf] = [];
-    confMap[conf].push(t);
-  }
-
-  const fields = [];
-  for (const [conf, confTeams] of Object.entries(confMap).sort()) {
-    const lines = confTeams
-      .sort((a, b) => (b.star_rating || 0) - (a.star_rating || 0))
-      .map(t => t.user_id
-        ? `🏈 **${t.team_name}** — <@${t.user_id}> (${t.star_rating || '?'}⭐)`
-        : `🟢 **${t.team_name}** — Available (${t.star_rating || '?'}⭐)`
-      );
-
-    for (let i = 0; i < lines.length; i += 15) {
-      fields.push({
-        name:  i === 0 ? `__${conf}__` : `__${conf} (cont.)__`,
-        value: lines.slice(i, i + 15).join('\n'),
-        inline: false,
-      });
-    }
-  }
-
-  if (fields.length === 0) {
-    return interaction.editReply('No teams found. Make sure teams are loaded in the database.');
-  }
-
-  const taken = teams.filter(t => t.user_id).length;
-  const avail = teams.filter(t => !t.user_id).length;
-
-  const embeds = [];
-  for (let i = 0; i < fields.length; i += 25) {
-    const embed = new EmbedBuilder()
-      .setColor(config.embed_color_primary_int)
-      .addFields(fields.slice(i, i + 25));
-
-    if (i === 0) {
-      embed
-        .setTitle(`📋 ${config.league_name} — Team List`)
-        .setDescription(
-          `**${taken}** coaches signed · **${avail}** teams available\n` +
-          `Showing teams rated **${minRating}⭐${maxRating < 999 ? ' – ' + maxRating + '⭐' : '+'}**`
-        )
-        .setTimestamp();
-    }
-    embeds.push(embed);
-  }
+  await postTeamList(interaction.guild, guildId, config, filterOverride);
 
   const listsChannel = findTextChannel(interaction.guild, config.channel_team_lists);
-  const target       = listsChannel || interaction.channel;
-
-  const botMember = interaction.guild.members.cache.get(client.user.id);
-  const perms     = target.permissionsFor(botMember);
-
-  if (!perms?.has('SendMessages')) {
-    return interaction.editReply(`❌ **Missing Channel Permissions**\nI don't have permission to post in ${target}.\n\n**Required permissions in that channel:**\n• Send Messages\n• Embed Links\n• Read Message History\n• Manage Messages (for cleanup)\n\nFix this in **Server Settings → Roles** or the channel's **Edit Channel → Permissions**, then try again. Run \`/checkpermissions\` for a full audit.`);
-  }
-
-  if (perms.has('ManageMessages')) {
-    try {
-      const messages = await target.messages.fetch({ limit: 100 });
-      for (const m of messages.filter(m => m.author.id === client.user.id).values()) {
-        await m.delete().catch(() => {});
-      }
-    } catch { /* ignore */ }
-  }
-
-  for (const embed of embeds) await target.send({ embeds: [embed] });
-
   await interaction.editReply(
     listsChannel && listsChannel.id !== interaction.channelId
       ? `✅ Team list posted in ${listsChannel}!`
