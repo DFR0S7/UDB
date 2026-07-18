@@ -2647,12 +2647,11 @@ async function postTeamList(guild, guildId, config, filterOverride = null) {
 
     for (const pos of tierPositions) {
       const divisionsAtTier = customConfs.filter(cc => cc.position === pos);
-      const tierName = divisionsAtTier[0]?.tier_name || `Tier ${pos}`;
-
       for (const cc of divisionsAtTier) {
+        // Use each conference's own tier_name — East and West can have different names
+        const label = `__${cc.tier_name} — ${cc.division_name}__`;
         const confTeams = (confTeamMap[cc.id] || [])
           .sort((a, b) => (a.team_name || '').localeCompare(b.team_name || ''));
-        const label = `__${tierName} — ${cc.division_name}__`;
         if (confTeams.length === 0) {
           fields.push({ name: label, value: '*No teams assigned*', inline: false });
           continue;
@@ -2662,7 +2661,7 @@ async function postTeamList(guild, guildId, config, filterOverride = null) {
           : `🟢 **${t.team_name}** — Available (${t.star_rating || '?'}⭐)`
         );
         for (let i = 0; i < lines.length; i += 15) {
-          fields.push({ name: i === 0 ? label : `__${tierName} — ${cc.division_name} (cont.)__`, value: lines.slice(i, i + 15).join('\n'), inline: false });
+          fields.push({ name: i === 0 ? label : `__${cc.tier_name} — ${cc.division_name} (cont.)__`, value: lines.slice(i, i + 15).join('\n'), inline: false });
         }
       }
     }
