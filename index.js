@@ -4607,18 +4607,22 @@ async function handleAutocomplete(interaction) {
     }
 
   } else if (commandName === 'set-conference') {
-    const guildId = interaction.guildId;
-    const focused = interaction.options.getFocused(true);
+    // Fetch all custom conferences for this guild regardless of league_id
+    const { data: allConfs } = await supabase
+      .from('custom_conferences')
+      .select('*')
+      .eq('guild_id', guildId)
+      .order('position');
+    const confs = allConfs || [];
+
     if (focused.name === 'team') {
       const { data: teams } = await supabase.from('teams').select('team_name')
         .ilike('team_name', `%${query}%`).order('team_name').limit(25);
       choices = (teams || []).map(t => ({ name: t.team_name, value: t.team_name }));
     } else if (focused.name === 'tier') {
-      const confs = await getCustomConferences(guildId);
       const tiers = [...new Set(confs.map(c => c.tier_name))].filter(t => t.toLowerCase().includes(query));
       choices = tiers.map(t => ({ name: t, value: t }));
     } else if (focused.name === 'division') {
-      const confs = await getCustomConferences(guildId);
       const divs = [...new Set(confs.map(c => c.division_name))].filter(d => d.toLowerCase().includes(query));
       choices = divs.map(d => ({ name: d, value: d }));
     }
