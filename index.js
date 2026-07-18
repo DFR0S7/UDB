@@ -4688,7 +4688,6 @@ async function handleAutocomplete(interaction) {
       { label: 'Max Star Rating',         key: 'star_rating_max_for_offers', hint: 'Maximum star rating for job offers' },
       { label: 'Offers Per User',         key: 'job_offers_count',           hint: 'Number of offers per user' },
       { label: 'Offer Expiry Hours',      key: 'job_offers_expiry_hours',    hint: 'Hours before offers expire (1–24)' },
-      { label: 'Team List Filter',         key: 'team_list_filter',           hint: 'Default filter: all, assigned, or available' },
       { label: 'Advance Intervals',       key: 'advance_intervals',          hint: 'Available advance intervals e.g. [24,48]' },
       { label: 'Primary Embed Color',     key: 'embed_color_primary',        hint: 'Primary embed color hex e.g. 0x1e90ff' },
       { label: 'Win Embed Color',         key: 'embed_color_win',            hint: 'Win result embed color hex' },
