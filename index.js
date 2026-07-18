@@ -1997,7 +1997,7 @@ async function handleConfigEdit(interaction) {
     'league_name', 'league_abbreviation', 'channel_news_feed', 'channel_advance_tracker',
     'channel_team_lists', 'channel_signed_coaches', 'channel_streaming', 'role_head_coach',
     'star_rating_for_offers', 'star_rating_max_for_offers', 'job_offers_count',
-    'job_offers_expiry_hours', 'advance_intervals',
+    'job_offers_expiry_hours', 'advance_intervals', 'team_list_filter',
     'embed_color_primary', 'embed_color_win', 'embed_color_loss',
   ];
   if (!allowed.includes(setting)) {
@@ -4688,6 +4688,7 @@ async function handleAutocomplete(interaction) {
       { label: 'Max Star Rating',         key: 'star_rating_max_for_offers', hint: 'Maximum star rating for job offers' },
       { label: 'Offers Per User',         key: 'job_offers_count',           hint: 'Number of offers per user' },
       { label: 'Offer Expiry Hours',      key: 'job_offers_expiry_hours',    hint: 'Hours before offers expire (1–24)' },
+      { label: 'Team List Filter',         key: 'team_list_filter',           hint: 'Default filter: all, assigned, or available' },
       { label: 'Advance Intervals',       key: 'advance_intervals',          hint: 'Available advance intervals e.g. [24,48]' },
       { label: 'Primary Embed Color',     key: 'embed_color_primary',        hint: 'Primary embed color hex e.g. 0x1e90ff' },
       { label: 'Win Embed Color',         key: 'embed_color_win',            hint: 'Win result embed color hex' },
