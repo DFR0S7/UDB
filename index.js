@@ -3785,19 +3785,27 @@ async function handleConferenceSetup(interaction) {
   const tierCount = parseInt(tierCountStr);
   if (isNaN(tierCount) || tierCount < 1) return dm.send('❌ Invalid number. Cancelled.');
 
-  // ── Step 3: Name each tier ─────────────────────────────────────────────
-  const tierNames = [];
+  // ── Step 3: Name each division within each tier separately ──────────────
+  // tierSlots[i] = { position: i+1, names: { [divisionName]: tierName } }
+  const tierSlots = [];
+  let suggestionIndex = 0;
+
   for (let i = 0; i < tierCount; i++) {
-    // Suggest a standard conference name as default
-    const suggestion = stdConfs[i] ? ` (suggestion: \`${stdConfs[i]}\`)` : '';
-    const name = await ask(`**[Step 3.${i + 1}]** Name for tier ${i + 1}${suggestion}\nThis is the top tier if it's tier 1.`);
-    if (!name) return dm.send('⏰ Timed out — cancelled.');
-    tierNames.push(name.trim());
+    const slotNames = {};
+    await dm.send(`**[Step 3.${i + 1}]** Tier ${i + 1} — name each division:`);
+    for (const div of divisions) {
+      const suggestion = stdConfs[suggestionIndex] ? ` (suggestion: \`${stdConfs[suggestionIndex]}\`)` : '';
+      const name = await ask(`  Name for **Tier ${i + 1} — ${div}**${suggestion}`);
+      if (!name) return dm.send('⏰ Timed out — cancelled.');
+      slotNames[div] = name.trim();
+      suggestionIndex++;
+    }
+    tierSlots.push({ position: i + 1, names: slotNames });
   }
 
   // ── Confirm ────────────────────────────────────────────────────────────
-  const preview = tierNames.map((t, i) =>
-    divisions.map(d => `  • ${t} — ${d}`).join('\n')
+  const preview = tierSlots.map(slot =>
+    divisions.map(d => `  • ${slot.names[d]} — ${d}`).join('\n')
   ).join('\n');
 
   const confirm = await askButtons(
@@ -3810,17 +3818,15 @@ async function handleConferenceSetup(interaction) {
   if (!confirm || confirm === 'cancel') return dm.send('↩️ Cancelled.');
 
   // ── Save ───────────────────────────────────────────────────────────────
-  // Clear existing
   if (existing.length > 0) {
     await supabase.from('custom_conferences').delete().eq('guild_id', guildId)
       .eq('league_id', leagueId || '00000000-0000-0000-0000-000000000000');
-    // Also clear null league_id entries if single-league
     if (!leagueId) await supabase.from('custom_conferences').delete().eq('guild_id', guildId).is('league_id', null);
   }
 
-  for (let i = 0; i < tierNames.length; i++) {
+  for (const slot of tierSlots) {
     for (const div of divisions) {
-      await upsertCustomConference(guildId, leagueId, tierNames[i], div, i + 1);
+      await upsertCustomConference(guildId, leagueId, slot.names[div], div, slot.position);
     }
   }
 
