@@ -817,6 +817,10 @@ function buildCommands() {
       .setDescription('[Admin] Reset league data for this server. Use with caution.'),
 
     new SlashCommandBuilder()
+      .setName('config-wizard')
+      .setDescription('[Admin] Update specific sections of your bot config without redoing full setup.'),
+
+    new SlashCommandBuilder()
       .setName('conference-setup')
       .setDescription('[Admin] Set up custom tier/division structure for the team list.'),
 
@@ -2898,7 +2902,7 @@ async function handleAdvance(interaction) {
 
   // Discord dynamic timestamp — renders in each user's own local timezone automatically
   const unixTimestamp = Math.floor(deadline.getTime() / 1000);
-  const deadlineLines = `<t:${unixTimestamp}:f> (<t:${unixTimestamp}:R>)`;
+  const deadlineLines = `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)`;
 
   // Mention @head-coach role on public announcement if it exists, else @everyone
   const headCoachRoleName = (config.role_head_coach || 'head coach').trim();
@@ -4683,6 +4687,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'reload-commands':    return handleReloadCommands(interaction);
         case 'rollback-advance':   return handleRollbackAdvance(interaction);
         case 'reset-league':        return handleResetLeague(interaction);
+        case 'config-wizard':       return handleConfigWizard(interaction);
         case 'conference-setup':    return handleConferenceSetup(interaction);
         case 'set-conference':      return handleSetConference(interaction);
         case 'promote-relegate':    return handlePromoteRelegate(interaction);
