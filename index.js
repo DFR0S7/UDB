@@ -68,6 +68,7 @@ const PHASE_CYCLE = [
     const labels = ['Bowl Week 1', 'Bowl Week 2', 'Semifinals', 'National Championship'];
     return labels[sub] ?? `Bowl Week ${sub + 1}`;
   }},
+  { key: 'end_of_season_recap', name: 'End of Season Recap',     subWeeks: 1,  startSub: 0, format: ()    => 'End of Season Recap' },
   { key: 'players_leaving',     name: 'Players Leaving',         subWeeks: 1,  startSub: 0, format: ()    => 'Players Leaving' },
   { key: 'transfer_portal',     name: 'Transfer Portal',         subWeeks: 4,  startSub: 0, format: (sub) => `Transfer Week ${sub + 1}` },
   { key: 'position_changes',    name: 'Position Changes',        subWeeks: 1,  startSub: 0, format: ()    => 'Position Changes' },
@@ -778,6 +779,7 @@ function buildCommands() {
           { name: 'Regular Season',           value: 'regular' },
           { name: 'Conference Championship',  value: 'conf_champ' },
           { name: 'Bowl Season',              value: 'bowl' },
+          { name: 'End of Season Recap',      value: 'end_of_season_recap' },
           { name: 'Players Leaving',          value: 'players_leaving' },
           { name: 'Transfer Portal',          value: 'transfer_portal' },
           { name: 'Position Changes',         value: 'position_changes' },
@@ -3265,6 +3267,7 @@ async function handleRollbackAdvance(interaction) {
     targetSub = parseInt(bowlChoice);
   } else if (phaseChoice === 'offseason') {
     const offChoice = await askButtons('**[Step 3/4]** Which offseason phase?', [
+      { id: 'end_of_season_recap', label: 'End of Season Recap' },
       { id: 'players_leaving',  label: 'Players Leaving' },
       { id: 'transfer_portal',  label: 'Transfer Portal' },
       { id: 'position_changes', label: 'Position Changes' },
