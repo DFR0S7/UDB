@@ -154,6 +154,7 @@ const CONFIG_DEFAULTS = {
   feature_stream_autopost:      false,
   feature_streaming_list:       false,
   feature_custom_conferences:   false,
+  feature_auto_role:            false,
   feature_promotion_relegation:  false,
   // ── Channels ──────────────────────────────────
   channel_news_feed:            'news-feed',
@@ -1346,6 +1347,7 @@ async function handleSetup(interaction) {
     { label: 'Streamer Register', id: 'feature_stream_autopost' },
     { label: 'Streamer List',     id: 'feature_streaming_list' },
     { label: 'Custom Conferences',      id: 'feature_custom_conferences' },
+    { label: 'Auto Role',              id: 'feature_auto_role' },
     { label: '↳ Promotion/Relegation', id: 'feature_promotion_relegation' },
   ];
 
@@ -1370,6 +1372,7 @@ async function handleSetup(interaction) {
     feature_stream_autopost:       allEnabled.includes('feature_stream_autopost'),
     feature_streaming_list:        allEnabled.includes('feature_streaming_list'),
     feature_custom_conferences:    allEnabled.includes('feature_custom_conferences'),
+    feature_auto_role:             allEnabled.includes('feature_auto_role'),
     feature_promotion_relegation:   allEnabled.includes('feature_promotion_relegation'),
   };
 
@@ -1809,6 +1812,7 @@ const FEATURE_GROUPS = [
       { id: 'feature_stream_autopost',  label: 'Streamer Register', desc: 'Store handle for use with Wamellow' },
       { id: 'feature_streaming_list',   label: 'Streamer List',   desc: '/streamer list for Wamellow' },
       { id: 'feature_custom_conferences',  label: 'Custom Conferences',      desc: 'Custom tier/division structure for team list instead of standard conferences' },
+      { id: 'feature_auto_role',            label: 'Auto Role',               desc: 'Automatically assign the head coach role to everyone who joins the server' },
       { id: 'feature_promotion_relegation', label: '↳ Promotion/Relegation', desc: 'Enables /promote-relegate command. Requires Custom Conferences to be on.' },
     ],
   },
@@ -4834,6 +4838,27 @@ client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
 // =====================================================
 // MEMBER LEAVE — Auto-resign coach
 // =====================================================
+// =====================================================
+// MEMBER JOIN — Auto-assign head coach role
+// =====================================================
+client.on(Events.GuildMemberAdd, async (member) => {
+  const guildId = member.guild.id;
+  try {
+    const config = await getConfig(guildId);
+    if (!config?.setup_complete)          return;
+    if (!config?.feature_auto_role)       return;
+    if (!config?.role_head_coach_id)      return;
+
+    const role = member.guild.roles.cache.get(config.role_head_coach_id);
+    if (!role) return;
+
+    await member.roles.add(role);
+    console.log(`[auto-role] Assigned "${role.name}" to ${member.user?.username || member.id} in ${member.guild.name}`);
+  } catch (err) {
+    console.error(`[auto-role] Failed to assign role in ${guildId}:`, err.message);
+  }
+});
+
 client.on(Events.GuildMemberRemove, async (member) => {
   const guildId = member.guild.id;
 
