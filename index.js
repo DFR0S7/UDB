@@ -4860,21 +4860,28 @@ client.on(Events.GuildMemberAdd, async (member) => {
 });
 
 client.on(Events.GuildMemberRemove, async (member) => {
-  const guildId = member.guild.id;
+  const guildId = member.guild?.id;
+  if (!guildId) return;
+
+  // Fetch full member data if partial
+  const userId = member.id || member.user?.id;
+  if (!userId) return;
 
   const config = await getConfig(guildId).catch(() => null);
   if (!config?.setup_complete) return;
 
   // Check if this user had a team assigned
-  const team = await getTeamByUser(member.id, guildId).catch(() => null);
-  if (!team) return; // Not a coach, nothing to do
+  const team = await getTeamByUser(userId, guildId).catch(() => null);
+  if (!team) {
+    console.log(`[leave] ${member.user?.username || userId} left ${member.guild?.name} — no team assigned`);
+    return;
+  }
 
   // Unassign the team — pass league_id if available (multi-league aware)
   await unassignTeam(team.id, guildId, team.league_id || null).catch(() => {});
 
-  // Remove head coach role if applicable (member already left, so this is a no-op but safe)
   // Remove stream registration
-  await removeCoachStream(guildId, member.id).catch(() => {});
+  await removeCoachStream(guildId, userId).catch(() => {});
 
   // Post resignation announcement
   const signedChannel = findTextChannel(member.guild, config.channel_signed_coaches);
@@ -4885,7 +4892,7 @@ client.on(Events.GuildMemberRemove, async (member) => {
     const embed = new EmbedBuilder()
       .setTitle('📋 Coach Resigned')
       .setColor(0xff4444)
-      .setDescription(`**${member.user?.username || member.id}** has left the server and resigned as head coach of **${team.team_name}**.`)
+      .setDescription(`**${member.user?.username || userId}** has left the server and resigned as head coach of **${team.team_name}**.`)
       .addFields(
         { name: 'Team',   value: team.team_name,                    inline: true },
         { name: 'Status', value: '🟢 Now Available',                inline: true },
@@ -4899,7 +4906,7 @@ client.on(Events.GuildMemberRemove, async (member) => {
   // Refresh team list
   await postTeamList(member.guild, guildId, config).catch(() => {});
 
-  console.log(`[leave] ${member.user?.username || member.id} left ${member.guild.name} — unassigned from ${team.team_name}`);
+  console.log(`[leave] ${member.user?.username || userId} left ${member.guild?.name} — unassigned from ${team.team_name}`);
 });
 
 // =====================================================
