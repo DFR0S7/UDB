@@ -151,8 +151,6 @@ const CONFIG_DEFAULTS = {
   feature_list_teams:           false,
   feature_move_coach:           false,
   feature_advance:              false,
-  feature_stream_autopost:      false,
-  feature_streaming_list:       false,
   feature_custom_conferences:   false,
   feature_auto_role:            false,
   feature_promotion_relegation:  false,
@@ -162,7 +160,6 @@ const CONFIG_DEFAULTS = {
   channel_team_lists:           'team-lists',
   team_list_filter:             'all',   // 'all' | 'assigned' | 'available' — saved via /config edit team_list_filter
   channel_signed_coaches:       'signed-coaches',
-  channel_streaming:            'streaming',
   // ── Roles ─────────────────────────────────────
   role_head_coach:              'head coach',
   role_head_coach_id:           null,
@@ -610,240 +607,6 @@ async function getDistinctConferences() {
 // COACH STREAM HELPERS
 // =====================================================
 
-async function setCoachStream(guildId, userId, handle, platform = 'twitch') {
-  const { error } = await supabase.from('coach_streams').upsert({
-    guild_id:   guildId,
-    user_id:    userId,
-    stream_url: handle.trim(),  // stream_url column stores the handle
-    platform,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: 'guild_id,user_id' });
-
-  if (error) throw error;
-}
-
-async function removeCoachStream(guildId, userId) {
-  await supabase
-    .from('coach_streams')
-    .delete()
-    .eq('guild_id', guildId)
-    .eq('user_id', userId);
-}
-
-async function getStreamerByHandle(guildId, handle) {
-  // Match handle case-insensitively against stream_url (which stores the handle)
-  const { data, error } = await supabase
-    .from('coach_streams')
-    .select('user_id, stream_url, platform')
-    .eq('guild_id', guildId);
-
-  if (error || !data) return null;
-  const normalised = handle.toLowerCase().replace(/^\//, '');
-  return data.find(r => r.stream_url.toLowerCase() === normalised) || null;
-}
-
-async function getAllStreamers(guildId) {
-  const { data, error } = await supabase
-    .from('coach_streams')
-    .select('user_id, stream_url, platform')
-    .eq('guild_id', guildId)
-    .order('platform', { ascending: true });
-
-  if (error) throw error;
-  return data || [];
-}
-// =====================================================
-// STREAM REMINDER TRACKING
-// =====================================================
-// =====================================================
-// SLASH COMMANDS DEFINITION
-// =====================================================
-function buildCommands() {
-  return [
-    // ── User Commands ──────────────────────────────
-    new SlashCommandBuilder()
-      .setName('joboffers')
-      .setDescription('Get coaching job offers based on your current team rating'),
-
-
-    // ── Admin Commands ─────────────────────────────
-    new SlashCommandBuilder()
-      .setName('setup')
-      .setDescription('Interactive bot configuration wizard (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-
-    new SlashCommandBuilder()
-      .setName('config')
-      .setDescription('Manage bot configuration (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addSubcommand(sub => sub.setName('view').setDescription('View current configuration'))
-      .addSubcommand(sub => sub.setName('features').setDescription('Toggle features on/off'))
-      .addSubcommand(sub => sub.setName('reload').setDescription('Reload config from database'))
-      .addSubcommand(sub => sub.setName('timezones').setDescription('Configure timezones shown on advance deadline posts'))
-      .addSubcommand(sub =>
-        sub.setName('edit')
-          .setDescription('Edit a specific config value')
-          .addStringOption(o => o.setName('setting').setDescription('Setting name').setRequired(true).setAutocomplete(true))
-          .addStringOption(o => o.setName('value').setDescription('New value').setRequired(true).setAutocomplete(true))
-      ),
-
-    new SlashCommandBuilder()
-      .setName('assign-team')
-      .setDescription('Manually assign a team to a user (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addUserOption(o => o.setName('user').setDescription('Discord user').setRequired(true))
-      .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
-      .addBooleanOption(o => o.setName('skip-announcement').setDescription('Skip signing announcement').setRequired(false)),
-
-    new SlashCommandBuilder()
-      .setName('resetteam')
-      .setDescription('Remove a coach from their team (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addUserOption(o => o.setName('user').setDescription('User to reset').setRequired(false))
-      .addStringOption(o => o.setName('team').setDescription('Team name — use if the coach already left the server').setRequired(false).setAutocomplete(true)),
-
-    new SlashCommandBuilder()
-      .setName('listteams')
-      .setDescription('Post the team availability list (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addStringOption(o => o
-        .setName('filter')
-        .setDescription('Filter teams (overrides server default for this view)')
-        .setRequired(false)
-        .addChoices(
-          { name: '👥 All Teams',           value: 'all' },
-          { name: '🏈 Assigned Only',       value: 'assigned' },
-          { name: '🟢 Available Only',      value: 'available' },
-          { name: '🏟️ Conference View',     value: 'conference_view' },
-        )),
-
-    new SlashCommandBuilder()
-      .setName('advance')
-      .setDescription('Advance to next week (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addStringOption(o => o.setName('hours').setDescription('Deadline window for this week').setRequired(true).setAutocomplete(true)),
-
-
-    new SlashCommandBuilder()
-      .setName('move-coach')
-      .setDescription('Move a coach from one team to another (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addStringOption(o => o.setName('coach').setDescription('Coach to move').setRequired(true).setAutocomplete(true))
-      .addStringOption(o => o.setName('new-team').setDescription('Destination team').setRequired(true).setAutocomplete(true)),
-
-
-    new SlashCommandBuilder()
-      .setName('help')
-      .setDescription('View available commands and how to use them'),
-
-    new SlashCommandBuilder()
-      .setName('checkpermissions')
-      .setDescription('Check if the bot has all required permissions (Admin only)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-
-    new SlashCommandBuilder()
-      .setName('streamer')
-      .setDescription('Streamer commands for Wamellow integration')
-      .addSubcommand(sub => sub
-        .setName('register')
-        .setDescription('Streamer Registration — save your Twitch or YouTube handle')
-        .addStringOption(o =>
-          o.setName('platform')
-           .setDescription('Your streaming platform')
-           .setRequired(true)
-           .addChoices(
-             { name: 'Twitch',  value: 'twitch' },
-             { name: 'YouTube', value: 'youtube' },
-           )
-        )
-        .addStringOption(o =>
-          o.setName('handle')
-           .setDescription('Your username/handle (e.g. johndoe — no URL needed)')
-           .setRequired(true)
-        )
-      )
-      .addSubcommand(sub => sub
-        .setName('list')
-        .setDescription('Streamer List — show all coaches, their Discord name, and handle')
-      ),
-
-    new SlashCommandBuilder()
-      .setName('set-phase')
-      .setDescription('[Admin] Manually set the current season, phase, and week.')
-      .addIntegerOption(o => o.setName('season').setDescription('Season number (e.g. 3)').setRequired(true).setMinValue(1))
-      .addStringOption(o => o
-        .setName('phase')
-        .setDescription('Phase to set')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Preseason',               value: 'preseason' },
-          { name: 'Regular Season',           value: 'regular' },
-          { name: 'Conference Championship',  value: 'conf_champ' },
-          { name: 'Bowl Season',              value: 'bowl' },
-          { name: 'End of Season Recap',      value: 'end_of_season_recap' },
-          { name: 'Players Leaving',          value: 'players_leaving' },
-          { name: 'Transfer Portal',          value: 'transfer_portal' },
-          { name: 'Position Changes',         value: 'position_changes' },
-          { name: 'Training Results',         value: 'training_results' },
-          { name: 'Encourage Transfers',      value: 'encourage_transfers' },
-        )
-      )
-      .addIntegerOption(o => o
-        .setName('sub')
-        .setDescription('Sub-phase index. Regular: 0–14 (week). Bowl: 0–3. Transfer: 0–3 (displays as Week 1–4). Others: 0.')
-        .setRequired(false)
-        .setMinValue(0)
-      ),
-
-    new SlashCommandBuilder()
-      .setName('reload-commands')
-      .setDescription('[Admin] Force re-register all slash commands with Discord.'),
-
-    new SlashCommandBuilder()
-      .setName('offers-config')
-      .setDescription('[Admin] Configure job offer conference rules and weighting.'),
-
-    new SlashCommandBuilder()
-      .setName('rollback-advance')
-      .setDescription('[Admin] Roll the league back to a previous season, phase, and week.'),
-
-    new SlashCommandBuilder()
-      .setName('league-list')
-      .setDescription('Show all leagues configured in this server.'),
-
-    new SlashCommandBuilder()
-      .setName('add-league')
-      .setDescription('[Admin] Add a new league to this server (multi-league mode).'),
-
-    new SlashCommandBuilder()
-      .setName('reset-league')
-      .setDescription('[Admin] Reset league data for this server. Use with caution.'),
-
-    new SlashCommandBuilder()
-      .setName('config-wizard')
-      .setDescription('[Admin] Update specific sections of your bot config without redoing full setup.'),
-
-    new SlashCommandBuilder()
-      .setName('conference-setup')
-      .setDescription('[Admin] Set up custom tier/division structure for the team list.'),
-
-    new SlashCommandBuilder()
-      .setName('set-conference')
-      .setDescription('[Admin] Assign a team to a custom conference.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
-      .addStringOption(o => o.setName('conference').setDescription('Conference name (e.g. SEC, B10)').setRequired(true).setAutocomplete(true)),
-
-    new SlashCommandBuilder()
-      .setName('promote-relegate')
-      .setDescription('[Admin] Move a team up or down a tier within their division.'),
-
-  ].map(cmd => cmd.toJSON());
-}
-
-// =====================================================
-// REGISTER SLASH COMMANDS
-// =====================================================
 async function registerCommands() {
   const rest     = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
   const commands = buildCommands();
@@ -1074,10 +837,7 @@ async function handleSetup(interaction) {
 
   const leagueAbbr = await ask(
     '**[League 2/3]** What is your league abbreviation or keyword?\n' +
-    'Example: `CMR`\n\n' +
-    '📡 **Wamellow note:** This keyword is used to filter stream titles. ' +
-    'Wamellow will only autopost streams whose title contains this abbreviation — ' +
-    'make sure your coaches include it in their stream titles.'
+    'Example: `CMR`'
   );
   if (!leagueAbbr) return;
 
@@ -1343,9 +1103,7 @@ async function handleSetup(interaction) {
   const advanceCmds = [
     { label: 'Advance', id: 'feature_advance' },
   ];
-  const streamingCmds = [
-    { label: 'Streamer Register', id: 'feature_stream_autopost' },
-    { label: 'Streamer List',     id: 'feature_streaming_list' },
+  const extraCmds = [
     { label: 'Custom Conferences',      id: 'feature_custom_conferences' },
     { label: 'Auto Role',              id: 'feature_auto_role' },
     { label: '↳ Promotion/Relegation', id: 'feature_promotion_relegation' },
@@ -1357,10 +1115,9 @@ async function handleSetup(interaction) {
   if (teamEnabled === null) return;
   const advanceEnabled   = await askGroupFeatures('Advance Management', '📅', advanceCmds);
   if (advanceEnabled === null) return;
-  const streamingEnabled = await askGroupFeatures('Autopost Streams (Wamellow)', '📡', streamingCmds);
-  if (streamingEnabled === null) return;
-
-  const allEnabled = [...teamEnabled, ...advanceEnabled, ...streamingEnabled];
+  const extraEnabled     = await askGroupFeatures('Extra Features',        '⚙️', extraCmds);
+  if (extraEnabled === null) return;
+  const allEnabled = [...teamEnabled, ...advanceEnabled, ...extraEnabled];
 
   const features = {
     feature_job_offers:            allEnabled.includes('feature_job_offers'),
@@ -1369,8 +1126,6 @@ async function handleSetup(interaction) {
     feature_list_teams:            allEnabled.includes('feature_list_teams'),
     feature_move_coach:            allEnabled.includes('feature_move_coach'),
     feature_advance:               allEnabled.includes('feature_advance'),
-    feature_stream_autopost:       allEnabled.includes('feature_stream_autopost'),
-    feature_streaming_list:        allEnabled.includes('feature_streaming_list'),
     feature_custom_conferences:    allEnabled.includes('feature_custom_conferences'),
     feature_auto_role:             allEnabled.includes('feature_auto_role'),
     feature_promotion_relegation:   allEnabled.includes('feature_promotion_relegation'),
@@ -1382,16 +1137,14 @@ async function handleSetup(interaction) {
     channel_signed_coaches:  'signed-coaches',
     channel_team_lists:      'team-lists',
     channel_advance_tracker: 'advance-tracker',
-    channel_streaming:       'streaming',
   };
 
   const needsNewsFeed  = false; // News feed no longer driven by feature flags — always available if channel is set
   const needsSigned    = features.feature_job_offers || features.feature_assign_team;
   const needsTeamList  = features.feature_list_teams;
   const needsAdvance   = features.feature_advance;
-  const needsStreaming = features.feature_stream_autopost || features.feature_streaming_list;
 
-  if (needsNewsFeed || needsSigned || needsTeamList || needsAdvance || needsStreaming) {
+  if (needsNewsFeed || needsSigned || needsTeamList || needsAdvance) {
     // For multi-league: filter channels to the main league's category
     const mainCategoryChannels = (isMultiLeague && mainLeagueCategoryId)
       ? textChannels.filter(c => c.parentId === mainLeagueCategoryId)
@@ -1423,11 +1176,7 @@ async function handleSetup(interaction) {
       if (!ch) return;
       channelConfig.channel_advance_tracker = ch.name;
     }
-    if (needsStreaming) {
-      const ch = await pickChannel('🎮 **Streaming** — Which channel should the bot monitor for stream links?', channelList);
-      if (!ch) return;
-      channelConfig.channel_streaming = ch.name;
-    }
+
   }
 
   // ── Role Setup ────────────────────────────────────────────────────────────
@@ -1504,7 +1253,6 @@ async function handleSetup(interaction) {
   }
 
   // ── Game Results Reminder Config ──────────────────────────────────────────
-  let streamConfig = {};
 
 
   // ── Advance Management Config ─────────────────────────────────────────────
@@ -1553,7 +1301,6 @@ async function handleSetup(interaction) {
       role_head_coach_id:  headCoachRoleId,
       ...features,
       ...jobOffersConfig,
-      ...streamConfig,
       ...advanceConfig,
       setup_complete:      true,
       league_type:         leagueType,
@@ -1569,7 +1316,6 @@ async function handleSetup(interaction) {
       channel_news_feed:       channelConfig.channel_news_feed,
       channel_advance_tracker: channelConfig.channel_advance_tracker,
       channel_signed_coaches:  channelConfig.channel_signed_coaches,
-      channel_streaming:       channelConfig.channel_streaming,
       channel_team_lists:      channelConfig.channel_team_lists,
     });
 
@@ -1587,8 +1333,7 @@ async function handleSetup(interaction) {
         channel_news_feed:       channelConfig.channel_news_feed,
         channel_advance_tracker: channelConfig.channel_advance_tracker,
         channel_signed_coaches:  channelConfig.channel_signed_coaches,
-        channel_streaming:       channelConfig.channel_streaming,
-        channel_team_lists:      channelConfig.channel_team_lists,
+          channel_team_lists:      channelConfig.channel_team_lists,
       });
     }
 
@@ -1613,8 +1358,6 @@ async function handleSetup(interaction) {
         inline: false,
       },
       {
-        name: '📡 Autopost Streams (Wamellow)',
-        value: `${fv('feature_stream_autopost')} Streamer Register  ${fv('feature_streaming_list')} Streamer List`,
         inline: false,
       },
       { name: '\u200b', value: '\u200b', inline: false },
@@ -1624,7 +1367,6 @@ async function handleSetup(interaction) {
     if (needsSigned)    summaryFields.push({ name: 'Signed Coaches',  value: '#' + channelConfig.channel_signed_coaches,  inline: true });
     if (needsTeamList)  summaryFields.push({ name: 'Team Lists',      value: '#' + channelConfig.channel_team_lists,      inline: true });
     if (needsAdvance)   summaryFields.push({ name: 'Advance Tracker', value: '#' + channelConfig.channel_advance_tracker, inline: true });
-    if (needsStreaming) summaryFields.push({ name: 'Streaming',       value: '#' + channelConfig.channel_streaming,       inline: true });
     summaryFields.push({ name: 'Head Coach Role', value: headCoachRoleId ? `@${headCoachRoleName}` : '@everyone (no role assigned)', inline: true });
     summaryFields.push({ name: '\u200b', value: '\u200b', inline: true });
 
@@ -1658,94 +1400,6 @@ async function handleSetup(interaction) {
   }
 }
 
-// /streamer ──────────────────────────────────────────
-async function handleStreaming(interaction) {
-  await interaction.deferReply({ flags: 64 });
-  const config = await getConfig(interaction.guildId);
-  const sub    = interaction.options.getSubcommand();
-
-  if (!config.setup_complete) return replySetupRequired(interaction);
-  const featureEnabled = sub === 'register' ? config.feature_stream_autopost : config.feature_streaming_list;
-  if (!featureEnabled) {
-    return interaction.editReply({ content: `❌ **${sub === 'register' ? 'Streamer Registration' : 'Streamer List'} Disabled**\nThis feature is turned off. An admin can enable it with \`/config features\`.` });
-  }
-
-  if (sub === 'register') {
-    const platform = interaction.options.getString('platform', true);
-    const handle   = interaction.options.getString('handle', true).trim().replace(/^@/, '');
-
-    if (!handle) {
-      return interaction.editReply('❌ **Invalid Handle**\nPlease enter your username without spaces (e.g. `johndoe`).');
-    }
-
-    try {
-      // Store platform + handle. stream_url column reused to store the handle,
-      // platform column stores 'twitch' or 'youtube'.
-      await setCoachStream(interaction.guildId, interaction.user.id, handle, platform);
-      const platformLabel = platform === 'twitch' ? 'Twitch' : 'YouTube';
-      await interaction.editReply(
-        `✅ **Streamer Registered!**\n` +
-        `Platform: **${platformLabel}**\nHandle: **${handle}**\n\n` +
-        `Admins can run \`/streamer list\` to see all registered coaches.`
-      );
-    } catch (err) {
-      console.error('[streamer register] Error:', err);
-      await interaction.editReply(`❌ **Failed to save handle**\nDatabase error: ${err.message}`);
-    }
-    return;
-  }
-
-  if (sub === 'list') {
-    let streamers;
-    try {
-      streamers = await getAllStreamers(interaction.guildId);
-    } catch (err) {
-      return interaction.editReply(`❌ **Database Error**\nCouldn't load streamers: ${err.message}`);
-    }
-
-    if (streamers.length === 0) {
-      return interaction.editReply('No coaches have registered a stream handle yet.');
-    }
-
-    // Build rows: Discord display name + platform + handle
-    const rows = streamers.map(entry => {
-      const member   = interaction.guild.members.cache.get(entry.user_id);
-      const discName = member?.displayName ?? `Unknown (${entry.user_id})`;
-      const platform = entry.platform === 'youtube' ? 'YouTube' : 'Twitch';
-      return { discName, platform, handle: entry.stream_url };
-    });
-
-    // Pad columns for alignment
-    const nameLen     = Math.max('Coach'.length,    ...rows.map(r => r.discName.length));
-    const platformLen = Math.max('Platform'.length, ...rows.map(r => r.platform.length));
-    const handleLen   = Math.max('Handle'.length,   ...rows.map(r => r.handle.length));
-
-    const pad = (str, len) => str.padEnd(len);
-    const header  = `${pad('Coach', nameLen)}  ${pad('Platform', platformLen)}  Handle`;
-    const divider = `${'-'.repeat(nameLen)}  ${'-'.repeat(platformLen)}  ${'-'.repeat(handleLen)}`;
-    const tableLines = rows.map(r =>
-      `${pad(r.discName, nameLen)}  ${pad(r.platform, platformLen)}  ${r.handle}`
-    );
-    const table = [header, divider, ...tableLines].join('\n');
-
-    const block = '```\n' + table + '\n```';
-    if (block.length <= 2000) {
-      await interaction.editReply({ content: `**Streamers (${rows.length})**\n${block}` });
-    } else {
-      await interaction.editReply({ content: `**Streamers (${rows.length})** — copy the table below:` });
-      let chunk = '```\n' + header + '\n' + divider + '\n';
-      for (const line of tableLines) {
-        if ((chunk + line + '\n```').length > 2000) {
-          await interaction.followUp({ content: chunk + '```', flags: 64 });
-          chunk = '```\n';
-        }
-        chunk += line + '\n';
-      }
-      if (chunk !== '```\n') await interaction.followUp({ content: chunk + '```', flags: 64 });
-    }
-    return;
-  }
-}
 
 // /config view ────────────────────────────────────────
 async function handleConfigView(interaction) {
@@ -1761,15 +1415,13 @@ async function handleConfigView(interaction) {
       { name: '\u200b',          value: '\u200b',                                 inline: true },
       { name: '🔧 Features', value:
         `👥 ${config.feature_job_offers ? '✅' : '❌'} Job Offers  ${config.feature_assign_team ? '✅' : '❌'} Assign  ${config.feature_reset_team ? '✅' : '❌'} Reset  ${config.feature_list_teams ? '✅' : '❌'} List  ${config.feature_move_coach ? '✅' : '❌'} Move\n` +
-        `📅 ${config.feature_advance ? '✅' : '❌'} Advance\n` +
-        `📡 ${config.feature_stream_autopost ? '✅' : '❌'} Streamer Register  ${config.feature_streaming_list ? '✅' : '❌'} Streamer List`,
+        `📅 ${config.feature_advance ? '✅' : '❌'} Advance`,
         inline: false },
       { name: '📺 Channels', value:
         `News Feed: \`${config.channel_news_feed}\`\n` +
         `Advance Tracker: \`${config.channel_advance_tracker}\`\n` +
         `Team Lists: \`${config.channel_team_lists}\`\n` +
-        `Signed Coaches: \`${config.channel_signed_coaches}\`\n` +
-        `Streaming: \`${config.channel_streaming}\``,
+        `Signed Coaches: \`${config.channel_signed_coaches}\``,
         inline: true },
       { name: '🎮 Settings', value:
         `Min Star Rating: \`${config.star_rating_for_offers}\`\n` +
@@ -1803,17 +1455,6 @@ const FEATURE_GROUPS = [
     label: '📅 Advance Management',
     commands: [
       { id: 'feature_advance', label: 'Advance', desc: 'Advance to next week/phase — season rolls over automatically' },
-    ],
-  },
-  {
-    key:   'autopost_streams',
-    label: '📡 Autopost Streams (Wamellow)',
-    commands: [
-      { id: 'feature_stream_autopost',  label: 'Streamer Register', desc: 'Store handle for use with Wamellow' },
-      { id: 'feature_streaming_list',   label: 'Streamer List',   desc: '/streamer list for Wamellow' },
-      { id: 'feature_custom_conferences',  label: 'Custom Conferences',      desc: 'Custom tier/division structure for team list instead of standard conferences' },
-      { id: 'feature_auto_role',            label: 'Auto Role',               desc: 'Automatically assign the head coach role to everyone who joins the server' },
-      { id: 'feature_promotion_relegation', label: '↳ Promotion/Relegation', desc: 'Enables /promote-relegate command. Requires Custom Conferences to be on.' },
     ],
   },
 ];
@@ -1974,7 +1615,7 @@ async function handleConfigEdit(interaction) {
   const value   = interaction.options.getString('value');
   const allowed = [
     'league_name', 'league_abbreviation', 'channel_news_feed', 'channel_advance_tracker',
-    'channel_team_lists', 'channel_signed_coaches', 'channel_streaming', 'role_head_coach',
+    'channel_team_lists', 'channel_signed_coaches', 'role_head_coach',
     'star_rating_for_offers', 'star_rating_max_for_offers', 'job_offers_count',
     'job_offers_expiry_hours', 'advance_intervals', 'team_list_filter',
     'embed_color_primary', 'embed_color_win', 'embed_color_loss',
@@ -2311,40 +1952,6 @@ async function handleAcceptOffer(interaction) {
   await interaction.editReply({ embeds: [successEmbed], components: [] });
 
   // ── Prompt for stream handle if feature is enabled ───────────────────────
-  if (config.feature_stream_autopost && guild) {
-    const member = await guild.members.fetch(userId).catch(() => null);
-    if (member) {
-      try {
-        const platformRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('stream_platform_twitch').setLabel('Twitch').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId('stream_platform_youtube').setLabel('YouTube').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId('stream_platform_skip').setLabel('Skip').setStyle(ButtonStyle.Danger),
-        );
-        const streamPrompt = await member.send({
-          content:
-            `🎮 **One more thing!** Want to register your stream handle for **${offer.teams.team_name}**?\n` +
-            `This lets the bot tag you for game result reminders after your streams.\n\n` +
-            `What platform do you stream on?`,
-          components: [platformRow],
-        });
-        const platformBtn = await streamPrompt.awaitMessageComponent({ time: 120000 }).catch(() => null);
-        if (platformBtn && platformBtn.customId !== 'stream_platform_skip') {
-          const platform = platformBtn.customId === 'stream_platform_twitch' ? 'twitch' : 'youtube';
-          await platformBtn.update({ content: `Got it! What is your **${platform === 'twitch' ? 'Twitch' : 'YouTube'}** handle? (just the username, no URL)`, components: [] });
-          const handleMsg = await streamPrompt.channel.awaitMessages({ filter: m => m.author.id === userId, max: 1, time: 60000 }).catch(() => null);
-          const handle = handleMsg?.first()?.content?.trim().replace(/^@/, '');
-          if (handle) {
-            await setCoachStream(guildId, userId, handle, platform);
-            await member.send(`✅ Stream handle **${handle}** (${platform === 'twitch' ? 'Twitch' : 'YouTube'}) registered! Admins can view all handles with \`/streamer list\`.`);
-          }
-        } else if (platformBtn) {
-          await platformBtn.update({ content: 'No problem — you can register anytime with `/streamer register`.', components: [] });
-        }
-      } catch {
-        // DMs blocked or timed out — silently skip
-      }
-    }
-  }
 
   if (guild) {
     const signingEmbed = new EmbedBuilder()
@@ -2514,7 +2121,6 @@ async function handleResetTeam(interaction) {
   }
 
   await unassignTeam(team.id, guildId, leagueId);
-  await removeCoachStream(guildId, targetId).catch(() => {});
 
   // Try to remove role if member is still in server
   const member = await interaction.guild.members.fetch(targetId).catch(() => null);
@@ -3464,6 +3070,43 @@ async function handleRollbackAdvance(interaction) {
   }
 }
 
+// /current-week ───────────────────────────────────────────────────────────
+async function handleCurrentWeek(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+  if (!config.setup_complete) return replySetupRequired(interaction);
+
+  const league = await getLeagueFromInteraction(interaction);
+  if (!league) return replyNoLeague(interaction);
+
+  const phase    = formatPhase(league.current_phase, league.current_sub_phase);
+  const deadline = league.advance_deadline ? new Date(league.advance_deadline) : null;
+  const unix     = deadline ? Math.floor(deadline.getTime() / 1000) : null;
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📅 ${config.league_name} — Current Week`)
+    .setColor(config.embed_color_primary_int || 0x1e90ff)
+    .addFields(
+      { name: 'Season',  value: `Season ${league.season}`,  inline: true },
+      { name: 'Phase',   value: phase,                       inline: true },
+      { name: 'Week',    value: `Week ${league.week}`,       inline: true },
+    );
+
+  if (unix) {
+    embed.addFields({
+      name:  '⏰ Advance Deadline',
+      value: `<t:${unix}:F> (<t:${unix}:R>)`,
+      inline: false,
+    });
+  } else {
+    embed.addFields({ name: '⏰ Advance Deadline', value: 'No active deadline', inline: false });
+  }
+
+  embed.setTimestamp();
+  await interaction.editReply({ embeds: [embed] });
+}
+
 // /league-list ────────────────────────────────────────────────────────────
 async function handleLeagueList(interaction) {
   await interaction.deferReply({ flags: 64 });
@@ -3615,7 +3258,6 @@ async function handleAddLeague(interaction) {
     channel_news_feed:       newsFeed,
     channel_advance_tracker: advTracker,
     channel_signed_coaches:  signedCoaches,
-    channel_streaming:       config.channel_streaming,
     channel_team_lists:      config.channel_team_lists,
   });
 
@@ -4028,11 +3670,10 @@ async function handleResetLeague(interaction) {
 
     if (resetType === 'full' || resetType === 'nuclear') {
       await supabase.from('team_assignments').delete().eq('guild_id', guildId);
-      await supabase.from('coach_streams').delete().eq('guild_id', guildId);
       await supabase.from('job_offer_config').delete().eq('guild_id', guildId);
       await supabase.from('job_offer_conferences').delete().eq('guild_id', guildId);
       summary.push(`👥 Unassigned all coaches`);
-      summary.push(`🧹 Cleared streams and job offer config`);
+      summary.push(`🧹 Cleared job offer config`);
     }
 
     if (resetType === 'nuclear') {
@@ -4183,7 +3824,7 @@ async function handleHelp(interaction) {
       adminOnly: true,
       title:     '❌ `/resetteam`',
       usage:     '/resetteam user: @user',
-      desc:      "Remove a coach from their team, strip their Head Coach role, and clear their stream handle.",
+      desc:      "Remove a coach from their team and strip their Head Coach role.",
     },
     {
       flag:      'feature_list_teams',
@@ -4208,22 +3849,7 @@ async function handleHelp(interaction) {
       desc:      "Advance the league to the next phase/week and set a deadline. The bot posts the new phase and deadline to the advance tracker channel.",
     },
 
-    // ── Streaming ──────────────────────────────────────────────────────────
-    {
-      flag:      'feature_stream_autopost',
-      adminOnly: false,
-      title:     '📡 `/streamer register`',
-      usage:     '/streamer register platform: Twitch|YouTube handle: <username>',
-      desc:      "Store your Twitch or YouTube handle for use with Wamellow autopost. Use /streamer list to get the full table for Wamellow setup.",
-    },
-    {
-      flag:      'feature_streaming_list',
-      adminOnly: true,
-      title:     '📋 `/streamer list`',
-      usage:     '/streamer list',
-      desc:      "Show all coaches and their registered stream handles. Formatted as a copyable table for pasting into Wamellow.",
-    },
-    // ── Always available ───────────────────────────────────────────────────
+    // ── Streaming ──────────────────────────────────────────────────────────    // ── Always available ───────────────────────────────────────────────────
     {
       flag:      null,
       adminOnly: false,
@@ -4370,7 +3996,6 @@ async function handleCheckPermissions(interaction) {
     { key: 'channel_signed_coaches',  label: 'Signed Coaches',  needsManage: false },
     { key: 'channel_team_lists',      label: 'Team Lists',      needsManage: true  },
     { key: 'channel_advance_tracker', label: 'Advance Tracker', needsManage: false },
-    { key: 'channel_streaming',       label: 'Streaming',       needsManage: false },
   ];
 
   const lines  = ['**📺 Channel Permissions**'];
@@ -4579,12 +4204,11 @@ async function handleAutocomplete(interaction) {
   } else if (commandName === 'config' && focused.name === 'setting') {
     const allSettings = [
       { label: 'League Name',             key: 'league_name',                hint: 'League display name' },
-      { label: 'League Abbreviation',     key: 'league_abbreviation',        hint: 'Short name for stream detection' },
+      { label: 'League Abbreviation',     key: 'league_abbreviation',        hint: 'Short name for your league' },
       { label: 'News Feed Channel',       key: 'channel_news_feed',          hint: 'Channel for results & announcements' },
       { label: 'Advance Tracker Channel', key: 'channel_advance_tracker',    hint: 'Channel for advance notices' },
       { label: 'Team Lists Channel',      key: 'channel_team_lists',         hint: 'Channel for team availability list' },
       { label: 'Signed Coaches Channel',  key: 'channel_signed_coaches',     hint: 'Channel for signing announcements' },
-      { label: 'Streaming Channel',       key: 'channel_streaming',          hint: 'Channel to monitor for stream links' },
       { label: 'Team List Filter',         key: 'team_list_filter',           hint: 'Default filter: all, assigned, available, or conference_view' },
       { label: 'Head Coach Role',         key: 'role_head_coach',            hint: 'Role assigned to coaches' },
 
@@ -4698,10 +4322,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'conference-setup':    return handleConferenceSetup(interaction);
         case 'set-conference':      return handleSetConference(interaction);
         case 'promote-relegate':    return handlePromoteRelegate(interaction);
+        case 'current-week':        return handleCurrentWeek(interaction);
         case 'league-list':         return handleLeagueList(interaction);
         case 'add-league':          return handleAddLeague(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
-        case 'streamer':          return handleStreaming(interaction);
         case 'config':
           switch (interaction.options.getSubcommand()) {
             case 'view':     return handleConfigView(interaction);
@@ -4731,110 +4355,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // =====================================================
 // MESSAGE LISTENER — Stream Reminders
 // =====================================================
-client.on(Events.MessageCreate, async (message) => {
-  // Allow Wamellow (a bot) through — block all other bots
-  if (!message.guildId) return;
-  const isWamellow = message.author.bot && message.author.username.toLowerCase().includes('wamellow');
-  if (message.author.bot && !isWamellow) return;
-
-  const config = await getConfig(message.guildId).catch(() => null);
-  if (!config?.setup_complete) return;
-
-  if (message.channel.name?.toLowerCase() !== config.channel_streaming?.toLowerCase()) return;
-
-  // Extract a Twitch or YouTube URL from message content OR embeds (Wamellow posts via embed)
-  const streamRegex = /https?:\/\/(?:www\.)?(?:twitch\.tv|youtube\.com\/(?:live\/|channel\/|@)?|youtu\.be\/)([^\s<>"'\/]+)/i;
-
-  let rawUrl = null;
-
-  // Check plain text content first
-  const contentMatch = message.content.match(streamRegex);
-  if (contentMatch) rawUrl = contentMatch[0];
-
-  // If not found in content, check embeds (Wamellow posts stream links as embeds)
-  if (!rawUrl && message.embeds?.length > 0) {
-    for (const embed of message.embeds) {
-      const searchTargets = [
-        embed.url,
-        embed.description,
-        embed.title,
-        ...(embed.fields || []).map(f => f.value),
-      ].filter(Boolean).join(' ');
-      const embedMatch = searchTargets.match(streamRegex);
-      if (embedMatch) { rawUrl = embedMatch[0]; break; }
-    }
-  }
-
-  if (!rawUrl) return;
-
-  const handleMatch = rawUrl.match(streamRegex);
-  if (!handleMatch) return;
-  const handle  = handleMatch[1].replace(/[?#].*$/, '').trim(); // strip query strings/fragments
-
-  if (isWamellow || message.author.bot) {
-    // Wamellow posted — look up the coach by handle
-    if (!handle) return;
-    const streamer = await getStreamerByHandle(message.guildId, handle).catch(() => null);
-    if (!streamer) {
-      console.warn(`[stream] Wamellow posted handle "${handle}" but no matching coach found in coach_streams`);
-      return;
-    }
-    console.log(`[stream] Wamellow post matched handle "${handle}" → user ${streamer.user_id}`);
-  } else {
-    // Coach posted their own link — tag them directly
-  }
-});
-
-
-// =====================================================
-// MESSAGE UPDATE — Catch Wamellow embed population
-// =====================================================
-// Discord delivers Wamellow's stream posts with empty embeds on MessageCreate,
-// then fires MessageUpdate when the embed is populated. We handle both events
-// with the same logic to ensure the reminder always triggers.
-client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
-  // Only care if embeds were added (Wamellow embed population)
-  if (!newMessage.guildId) return;
-  if (!newMessage.author?.bot) return;
-  const isWamellow = newMessage.author.username.toLowerCase().includes('wamellow');
-  if (!isWamellow) return;
-
-  // Only process if new message has embeds and old didn't (avoid duplicate triggers)
-  if ((oldMessage.embeds?.length || 0) > 0) return;
-  if (!newMessage.embeds?.length) return;
-
-  const config = await getConfig(newMessage.guildId).catch(() => null);
-  if (!config?.setup_complete) return;
-  if (newMessage.channel.name?.toLowerCase() !== config.channel_streaming?.toLowerCase()) return;
-
-  const streamRegex = /https?:\/\/(?:www\.)?(?:twitch\.tv|youtube\.com\/(?:live\/|channel\/|@)?|youtu\.be\/)([^\s<>"'\/]+)/i;
-
-  let rawUrl = null;
-  for (const embed of newMessage.embeds) {
-    const searchTargets = [
-      embed.url,
-      embed.description,
-      embed.title,
-      ...(embed.fields || []).map(f => f.value),
-    ].filter(Boolean).join(' ');
-    const embedMatch = searchTargets.match(streamRegex);
-    if (embedMatch) { rawUrl = embedMatch[0]; break; }
-  }
-
-  if (!rawUrl) return;
-
-  const handleMatch = rawUrl.match(streamRegex);
-  if (!handleMatch) return;
-  const handle  = handleMatch[1].replace(/[?#].*$/, '').trim();
-
-  const streamer = await getStreamerByHandle(newMessage.guildId, handle).catch(() => null);
-  if (!streamer) {
-    console.warn(`[stream] MessageUpdate — Wamellow handle "${handle}" not found in coach_streams`);
-    return;
-  }
-  console.log(`[stream] MessageUpdate matched handle "${handle}" → user ${streamer.user_id}`);
-});
-
 // =====================================================
 // MEMBER LEAVE — Auto-resign coach
 // =====================================================
@@ -4881,7 +4401,6 @@ client.on(Events.GuildMemberRemove, async (member) => {
   await unassignTeam(team.id, guildId, team.league_id || null).catch(() => {});
 
   // Remove stream registration
-  await removeCoachStream(guildId, userId).catch(() => {});
 
   // Post resignation announcement
   const signedChannel = findTextChannel(member.guild, config.channel_signed_coaches);
