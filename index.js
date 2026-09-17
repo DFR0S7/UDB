@@ -835,15 +835,9 @@ async function handleSetup(interaction) {
   const leagueName = await ask('**[League 1/3]** What is your league name?\nExample: CMR Dynasty');
   if (!leagueName) return;
 
-  const leagueAbbr = await ask(
-    '**[League 2/3]** What is your league abbreviation or keyword?\n' +
-    'Example: `CMR`'
-  );
-  if (!leagueAbbr) return;
-
   // ── League Type ───────────────────────────────────────────────────────────
   const leagueType = await askButtons(
-    '**[League 3/3]** What best describes your league?',
+    '**[League 2/2]** What best describes your league?',
     [
       { id: 'new',         label: '🆕 New League',         style: ButtonStyle.Primary },
       { id: 'established', label: '🏛️ Established League', style: ButtonStyle.Secondary },
@@ -883,15 +877,15 @@ async function handleSetup(interaction) {
     if (phaseGroup === 'regular') {
       let validWeek = false;
       while (!validWeek) {
-        const weekStr = await ask('**[League 6/?]** What week of the regular season? (0–14)\nExample: `8`');
+        const weekStr = await ask('**[League 6/?]** What week is currently displayed in your advance post? (1–16)\nExample: `8` for Week 8');
         if (!weekStr) return;
         const parsed = parseInt(weekStr);
-        if (!isNaN(parsed) && parsed >= 0 && parsed <= 14) {
+        if (!isNaN(parsed) && parsed >= 1 && parsed <= 16) {
+          currentSub  = parsed - 1; // sub is 0-indexed internally
           currentWeek = parsed;
-          currentSub  = parsed;
           validWeek   = true;
         } else {
-          await dm.send('❌ Please enter a number between 0 and 14.');
+          await dm.send('❌ Please enter a number between 1 and 16.');
         }
       }
 
@@ -912,10 +906,11 @@ async function handleSetup(interaction) {
       const offChoice = await askButtons(
         '**[League 6/?]** Which offseason phase?',
         [
-          { id: 'players_leaving',     label: 'Players Leaving',  style: ButtonStyle.Secondary },
-          { id: 'transfer_portal',     label: 'Transfer Portal',  style: ButtonStyle.Secondary },
-          { id: 'position_changes',    label: 'Position Changes', style: ButtonStyle.Secondary },
-          { id: 'training_results',    label: 'Training Results', style: ButtonStyle.Secondary },
+          { id: 'end_of_season_recap', label: 'End of Season Recap', style: ButtonStyle.Secondary },
+          { id: 'players_leaving',     label: 'Players Leaving',     style: ButtonStyle.Secondary },
+          { id: 'transfer_portal',     label: 'Transfer Portal',     style: ButtonStyle.Secondary },
+          { id: 'position_changes',    label: 'Position Changes',    style: ButtonStyle.Secondary },
+          { id: 'training_results',    label: 'Training Results',    style: ButtonStyle.Secondary },
         ]
       );
       if (!offChoice) return;
@@ -951,123 +946,9 @@ async function handleSetup(interaction) {
   }
 
   // ── Multi-League Setup ───────────────────────────────────────────────────
-  const multiLeagueChoice = await askButtons(
-    '**— League Mode —**\nWill this server host multiple leagues in separate categories?\n\n' +
-    '• **Single League** — one league for the whole server (default)\n' +
-    '• **Multi-League** — each Discord category is a separate league',
-    [
-      { id: 'single', label: '➡️ Single League',  style: ButtonStyle.Primary },
-      { id: 'multi',  label: '🏟️ Multi-League',   style: ButtonStyle.Secondary },
-    ]
-  );
-  if (!multiLeagueChoice) return;
-  const isMultiLeague = multiLeagueChoice === 'multi';
-  let mainLeagueCategoryId = null; // set during multi-league category mapping
-
-  // For multi-league: collect category mappings
-  const additionalLeagues = []; // { leagueName, categoryId, categoryName }
-  if (isMultiLeague) {
-    const categories = guild.channels.cache
-      .filter(c => c.type === 4)
-      .sort((a, b) => a.position - b.position);
-
-    if (!categories.size) {
-      await dm.send('⚠️ No Discord categories found. The server will be set up as single-league. You can add leagues later with `/add-league`.');
-    } else {
-      await dm.send(
-        `🏟️ **Multi-League Mode**\n\nYou can assign each Discord category to a separate league. ` +
-        `The main league (**${leagueName}**) will be the server-wide default.\n\n` +
-        `Let\'s configure additional leagues now. You can always add more later with \`/add-league\`.`
-      );
-
-      let addingLeagues = true;
-      while (addingLeagues) {
-        // Filter out already-mapped categories
-        const mappedIds = new Set(additionalLeagues.map(l => l.categoryId));
-        const available = [...categories.values()].filter(c => !mappedIds.has(c.id)).slice(0, 20);
-
-        if (!available.length) {
-          await dm.send('✅ All categories have been mapped to leagues.');
-          break;
-        }
-
-        const addAnother = await askButtons(
-          additionalLeagues.length === 0
-            ? '**[Multi-League]** Would you like to map a category to a league?'
-            : `**[Multi-League]** ${additionalLeagues.length} league(s) added. Add another?`,
-          [
-            { id: 'yes', label: '➕ Add League',  style: ButtonStyle.Primary },
-            { id: 'no',  label: '✅ Done',         style: ButtonStyle.Success },
-          ]
-        );
-        if (!addAnother || addAnother === 'no') { addingLeagues = false; break; }
-
-        // League name
-        const newLeagueName = await ask('What is the name of this league?\nExample: `East Division`');
-        if (!newLeagueName) return;
-
-        // Pick category
-        const catRows = [];
-        for (let i = 0; i < available.length; i += 5) {
-          catRows.push(new ActionRowBuilder().addComponents(
-            available.slice(i, i + 5).map(cat =>
-              new ButtonBuilder()
-                .setCustomId(`mlcat_${cat.id}`)
-                .setLabel(cat.name.slice(0, 80))
-                .setStyle(ButtonStyle.Secondary)
-            )
-          ));
-        }
-        const catMsg = await dm.send({ content: `Which category should **${newLeagueName}** use?`, components: catRows });
-        let pickedCatId, pickedCatName;
-        try {
-          const btn = await catMsg.awaitMessageComponent({ filter: i => i.user.id === userId, time: 120000 });
-          await btn.update({ components: [] });
-          pickedCatId   = btn.customId.replace('mlcat_', '');
-          pickedCatName = available.find(c => c.id === pickedCatId)?.name || pickedCatId;
-        } catch {
-          await dm.send(TIMEOUT_MSG);
-          return;
-        }
-
-        additionalLeagues.push({ leagueName: newLeagueName, categoryId: pickedCatId, categoryName: pickedCatName });
-        await dm.send(`✅ **${newLeagueName}** mapped to **${pickedCatName}**.`);
-      }
-    }
-
-    // Ask which category the MAIN league lives in
-    const mappedIds = new Set(additionalLeagues.map(l => l.categoryId));
-    const remainingCats = [...categories.values()].filter(c => !mappedIds.has(c.id)).slice(0, 20);
-    if (remainingCats.length > 0) {
-      const mainCatRows = [];
-      for (let i = 0; i < remainingCats.length; i += 5) {
-        mainCatRows.push(new ActionRowBuilder().addComponents(
-          remainingCats.slice(i, i + 5).map(cat =>
-            new ButtonBuilder()
-              .setCustomId(`mlmain_${cat.id}`)
-              .setLabel(cat.name.slice(0, 80))
-              .setStyle(ButtonStyle.Secondary)
-          )
-        ));
-      }
-      // Add a "No Category" option
-      mainCatRows.push(new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId('mlmain_none')
-          .setLabel('🌐 No Category (server-wide)')
-          .setStyle(ButtonStyle.Primary)
-      ));
-      const mainCatMsg = await dm.send({ content: `Which category does the main league (**${leagueName}**) live in?`, components: mainCatRows });
-      try {
-        const btn = await mainCatMsg.awaitMessageComponent({ filter: i => i.user.id === userId, time: 120000 });
-        await btn.update({ components: [] });
-        mainLeagueCategoryId = btn.customId === 'mlmain_none' ? null : btn.customId.replace('mlmain_', '');
-      } catch {
-        await dm.send(TIMEOUT_MSG);
-        return;
-      }
-    }
-  }
+  const isMultiLeague = false; // Multi-league configured via /add-league after setup
+  const mainLeagueCategoryId = null;
+  const additionalLeagues = [];
 
   // ── Group-Based Feature Selection ────────────────────────────────────────
 
@@ -1104,9 +985,9 @@ async function handleSetup(interaction) {
     { label: 'Advance', id: 'feature_advance' },
   ];
   const extraCmds = [
-    { label: 'Custom Conferences',      id: 'feature_custom_conferences' },
-    { label: 'Auto Role',              id: 'feature_auto_role' },
-    { label: '↳ Promotion/Relegation', id: 'feature_promotion_relegation' },
+    { label: 'Custom Conferences',                    id: 'feature_custom_conferences' },
+    { label: 'Auto Role',                             id: 'feature_auto_role' },
+    { label: '↳ Promotion/Relegation (requires Custom Conferences)', id: 'feature_promotion_relegation' },
   ];
 
   if (leagueType === 'established') await dm.send('💡 **Team Selection — Recommendation:** Enable **Assign Team** to map existing coaches to their teams directly. You likely won\'t need Job Offers unless you\'re still growing.');
@@ -1139,22 +1020,14 @@ async function handleSetup(interaction) {
     channel_advance_tracker: 'advance-tracker',
   };
 
-  const needsNewsFeed  = false; // News feed no longer driven by feature flags — always available if channel is set
+  const needsNewsFeed  = needsSigned || needsAdvance; // News feed needed for coach announcements and advance posts
   const needsSigned    = features.feature_job_offers || features.feature_assign_team;
   const needsTeamList  = features.feature_list_teams;
   const needsAdvance   = features.feature_advance;
 
   if (needsNewsFeed || needsSigned || needsTeamList || needsAdvance) {
-    // For multi-league: filter channels to the main league's category
-    const mainCategoryChannels = (isMultiLeague && mainLeagueCategoryId)
-      ? textChannels.filter(c => c.parentId === mainLeagueCategoryId)
-      : textChannels;
-    const channelList = mainCategoryChannels.length > 0 ? mainCategoryChannels : textChannels;
-
-    const catLabel = (isMultiLeague && mainLeagueCategoryId)
-      ? ` (showing channels in **${guild.channels.cache.get(mainLeagueCategoryId)?.name || 'selected category'}**)`
-      : '';
-    await dm.send(`**— Channel Setup —**\nSelect the channel for each feature group.${catLabel}`);
+    await dm.send('**— Channel Setup —**\nSelect the channel for each feature group.');
+    const channelList = textChannels;
 
     if (needsNewsFeed) {
       const ch = await pickChannel('📰 **News Feed** — Where should game results and standings post?', channelList);
@@ -1185,7 +1058,7 @@ async function handleSetup(interaction) {
 
   if (roles.length > 0) {
     const skipRoleChoice = await askButtons(
-      '**— Role Setup —**\nShould the bot assign a role to head coaches when they are signed?\n\n' +
+      '**— Role Setup —**\nShould the bot assign a role to head coaches when they are signed?\n\n💡 **Tip:** If your league uses `@everyone` as the coach role, choose **Skip** — the bot won\'t assign a role but will still track team assignments.\n\n' +
       'Choose **Pick a Role** to assign an existing role, or **Skip** if your server uses @everyone.',
       [
         { id: 'pick', label: '🎭 Pick a Role', style: ButtonStyle.Primary },
@@ -1295,7 +1168,6 @@ async function handleSetup(interaction) {
     await setMeta(guildId, initialMeta);
     await saveConfig(guildId, {
       league_name:         leagueName,
-      league_abbreviation: leagueAbbr,
       ...channelConfig,
       role_head_coach:     headCoachRoleName,
       role_head_coach_id:  headCoachRoleId,
@@ -1341,7 +1213,6 @@ async function handleSetup(interaction) {
     const fv = (flag) => features[flag] ? '✅' : '❌';
     const summaryFields = [
       { name: 'League Name',  value: leagueName,                                          inline: true },
-      { name: 'Abbreviation', value: leagueAbbr,                                          inline: true },
       { name: 'League Type',  value: leagueType === 'new' ? '🆕 New League' : '🏛️ Established League', inline: true },
 
       {
@@ -1410,7 +1281,6 @@ async function handleConfigView(interaction) {
     .setColor(config.embed_color_primary_int || 0x1e90ff)
     .addFields(
       { name: '📌 League',       value: config.league_name,                     inline: true },
-      { name: '🔤 Abbreviation', value: config.league_abbreviation || 'Not set', inline: true },
       { name: '🆔 Guild ID',     value: config.guild_id,                         inline: true },
       { name: '\u200b',          value: '\u200b',                                 inline: true },
       { name: '🔧 Features', value:
@@ -2344,7 +2214,7 @@ async function postTeamList(guild, guildId, config, filterOverride = null) {
             }`
           : `📋 Team Availability (cont.)`)
       .setColor(config.embed_color_primary_int || 0x1e90ff)
-      .setDescription(i === 0 ? `**${config.league_abbreviation || config.league_name}** · Updated <t:${Math.floor(Date.now()/1000)}:R>` : null)
+      .setDescription(i === 0 ? `**${config.league_name}** · Updated <t:${Math.floor(Date.now()/1000)}:R>` : null)
       .addFields(fields.slice(i, i + PAGE))
       .setTimestamp()
     );
