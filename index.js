@@ -36,7 +36,7 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const PORT = process.env.PORT || 3000;
 const SELF_PING_URL = process.env.SELF_PING_URL || '';
 const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID;
-const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
+//const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const STREAM_POLL_INTERVAL_MS = Number(process.env.STREAM_POLL_INTERVAL_MS || 90000);
 
