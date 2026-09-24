@@ -662,10 +662,10 @@ function buildCommands() {
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .addStringOption(o => o.setName('filter').setDescription('Filter teams').setRequired(false)
         .addChoices(
-          { name: '👥 All Teams',           value: 'all' },
-          { name: '🏈 Assigned Only',       value: 'assigned' },
-          { name: '🟢 Available Only',      value: 'available' },
-          { name: '🏟️ Conference View',     value: 'conference_view' },
+          { name: 'All Teams',        value: 'all' },
+          { name: 'Assigned Only',    value: 'assigned' },
+          { name: 'Available Only',   value: 'available' },
+          { name: 'Conference View',  value: 'conference_view' },
         )),
 
     new SlashCommandBuilder()
@@ -1156,7 +1156,7 @@ async function handleSetup(interaction) {
     { label: 'Streaming',                             id: 'feature_stream' },
     { label: 'Custom Conferences',                    id: 'feature_custom_conferences' },
     { label: 'Auto Role',                             id: 'feature_auto_role' },
-    { label: '↳ Promotion/Relegation (requires Custom Conferences)', id: 'feature_promotion_relegation' },
+    { label: 'Promotion/Relegation (req. Custom Conferences)',       id: 'feature_promotion_relegation' },
   ];
 
   if (leagueType === 'established') await dm.send('💡 **Team Selection — Recommendation:** Enable **Assign Team** to map existing coaches to their teams directly. You likely won\'t need Job Offers unless you\'re still growing.');
