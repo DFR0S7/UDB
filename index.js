@@ -1488,6 +1488,16 @@ const FEATURE_GROUPS = [
       { id: 'feature_advance', label: 'Advance', desc: 'Advance to next week/phase — season rolls over automatically' },
     ],
   },
+  {
+    key:   'extra',
+    label: '⚙️ Extra Features',
+    commands: [
+      { id: 'feature_stream',               label: 'Streaming',               desc: 'Coaches register Twitch/YouTube and post when live' },
+      { id: 'feature_custom_conferences',   label: 'Custom Conferences',      desc: 'Custom tier/division structure for team list' },
+      { id: 'feature_promotion_relegation', label: '↳ Promotion/Relegation', desc: 'Move teams between tiers each season (requires Custom Conferences)' },
+      { id: 'feature_auto_role',            label: 'Auto Role',               desc: 'Assign head coach role to everyone who joins the server' },
+    ],
+  },
 ];
 
 async function handleConfigFeatures(interaction) {
