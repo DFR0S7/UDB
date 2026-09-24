@@ -3103,14 +3103,24 @@ async function handleRollbackAdvance(interaction) {
 // =====================================================
 
 function parseStreamLink(link) {
-  // YouTube: youtube.com/watch?v=ID, youtube.com/live/ID, youtu.be/ID, youtube.com/@handle, youtube.com/c/handle
-  const ytMatch = link.match(
+  const clean = link.trim();
+
+  // YouTube: watch?v=, /live/, youtu.be/, /@handle, /c/, /channel/, or bare youtube.com/@handle
+  const ytMatch = clean.match(
     /(?:youtube\.com\/(?:watch\?v=|live\/|@|c\/|channel\/)|youtu\.be\/)([a-zA-Z0-9_\-@]+)/i
   );
-  if (ytMatch) return { platform: 'youtube', channelId: ytMatch[1] };
+  if (ytMatch) {
+    // Strip leading @ if present (youtube.com/@Mr-Dfr0s7 → Mr-Dfr0s7)
+    const channelId = ytMatch[1].replace(/^@/, '');
+    return { platform: 'youtube', channelId };
+  }
 
-  // Twitch (ready for when we add it)
-  const ttMatch = link.match(/twitch\.tv\/([a-zA-Z0-9_]+)/i);
+  // Also handle plain https://www.youtube.com/@handle with nothing after
+  const ytHandleMatch = clean.match(/youtube\.com\/@([a-zA-Z0-9_\-]+)\/?$/i);
+  if (ytHandleMatch) return { platform: 'youtube', channelId: ytHandleMatch[1] };
+
+  // Twitch
+  const ttMatch = clean.match(/twitch\.tv\/([a-zA-Z0-9_]+)/i);
   if (ttMatch) return { platform: 'twitch', channelId: ttMatch[1] };
 
   return null;
@@ -3119,7 +3129,7 @@ function parseStreamLink(link) {
 async function saveStreamRegistration({ guildId, leagueId, userId, platform, channelId, titlePrefix }) {
   const { error } = await supabase.from('stream_registrations').upsert(
     { guild_id: guildId, league_id: leagueId || null, user_id: userId, platform, channel_id: channelId, title_prefix: titlePrefix || null },
-    { onConflict: 'guild_id,user_id,platform' }
+    { onConflict: 'guild_id,user_id,platform', ignoreDuplicates: false }
   );
   if (error) throw error;
 }
