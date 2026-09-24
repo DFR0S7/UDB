@@ -1153,10 +1153,10 @@ async function handleSetup(interaction) {
     { label: 'Advance', id: 'feature_advance' },
   ];
   const extraCmds = [
+    { label: 'Streaming',                             id: 'feature_stream' },
     { label: 'Custom Conferences',                    id: 'feature_custom_conferences' },
     { label: 'Auto Role',                             id: 'feature_auto_role' },
     { label: '↳ Promotion/Relegation (requires Custom Conferences)', id: 'feature_promotion_relegation' },
-    { label: 'Streaming',                             id: 'feature_stream' },
   ];
 
   if (leagueType === 'established') await dm.send('💡 **Team Selection — Recommendation:** Enable **Assign Team** to map existing coaches to their teams directly. You likely won\'t need Job Offers unless you\'re still growing.');
@@ -1193,9 +1193,8 @@ async function handleSetup(interaction) {
   const needsSigned    = features.feature_job_offers || features.feature_assign_team;
   const needsTeamList  = features.feature_list_teams;
   const needsAdvance   = features.feature_advance;
-  const needsNewsFeed  = needsSigned || needsAdvance; // News feed needed for coach announcements and advance posts
 
-  if (needsNewsFeed || needsSigned || needsTeamList || needsAdvance) {
+  if (needsSigned || needsTeamList || needsAdvance || features.feature_stream) {
     await dm.send('**— Channel Setup —**\nSelect the channel for each feature group.');
     const channelList = textChannels;
 
@@ -1204,11 +1203,7 @@ async function handleSetup(interaction) {
       if (!ch) return;
       channelConfig.channel_streaming = ch.name;
     }
-    if (needsNewsFeed) {
-      const ch = await pickChannel('📰 **News Feed** — Where should game results and standings post?', channelList);
-      if (!ch) return;
-      channelConfig.channel_news_feed = ch.name;
-    }
+
     if (needsSigned) {
       const ch = await pickChannel('✍️ **Signed Coaches** — Where should coach signing announcements post?', channelList);
       if (!ch) return;
@@ -1320,21 +1315,6 @@ async function handleSetup(interaction) {
     const selectedIntervals = intervalChoices.length > 0 ? intervalChoices : ['24', '48'];
     advanceConfig = { advance_intervals: JSON.stringify(selectedIntervals.map(Number)) };
 
-    const tzChoices = await askMultiButtons(
-      '**— Advance Timezones —**\nWhich timezones should appear on advance deadline posts? Select all that apply.',
-      [
-        { id: 'ET',   label: '🌴 ET  (New York)'    },
-        { id: 'CT',   label: '🐄 CT  (Chicago)'     },
-        { id: 'MT',   label: '🏔️ MT  (Denver)'      },
-        { id: 'PT',   label: '🌊 PT  (Los Angeles)' },
-        { id: 'GMT',  label: '🌐 GMT (London)'      },
-        { id: 'AEST', label: '🦘 AEST (Sydney)'     },
-        { id: 'NZST', label: '🥝 NZST (Auckland)'  },
-      ]
-    );
-    if (!tzChoices) return;
-    const selectedTZ = tzChoices.length > 0 ? tzChoices : ['ET', 'CT', 'MT', 'PT'];
-    advanceConfig.advance_timezones = JSON.stringify(selectedTZ);
   }
 
   // ── Save Config ───────────────────────────────────────────────────────────
@@ -1359,8 +1339,6 @@ async function handleSetup(interaction) {
       league_name:             leagueName,
       ...initialMeta,
       advance_intervals:       advanceConfig.advance_intervals || '[24, 48]',
-      advance_timezones:       advanceConfig.advance_timezones || '["ET","CT","MT","PT"]',
-      channel_news_feed:       channelConfig.channel_news_feed,
       channel_advance_tracker: channelConfig.channel_advance_tracker,
       channel_signed_coaches:  channelConfig.channel_signed_coaches,
       channel_streaming:       channelConfig.channel_streaming || 'streaming',
@@ -1377,9 +1355,7 @@ async function handleSetup(interaction) {
         current_sub_phase:       0,
         advance_hours:           24,
         advance_intervals:       advanceConfig.advance_intervals || '[24, 48]',
-        advance_timezones:       advanceConfig.advance_timezones || '["ET","CT","MT","PT"]',
-        channel_news_feed:       channelConfig.channel_news_feed,
-        channel_advance_tracker: channelConfig.channel_advance_tracker,
+            channel_advance_tracker: channelConfig.channel_advance_tracker,
         channel_signed_coaches:  channelConfig.channel_signed_coaches,
           channel_team_lists:      channelConfig.channel_team_lists,
       });
@@ -1410,7 +1386,6 @@ async function handleSetup(interaction) {
       { name: '\u200b', value: '\u200b', inline: false },
     ];
 
-    if (needsNewsFeed)  summaryFields.push({ name: 'News Feed',       value: '#' + channelConfig.channel_news_feed,       inline: true });
     if (needsSigned)    summaryFields.push({ name: 'Signed Coaches',  value: '#' + channelConfig.channel_signed_coaches,  inline: true });
     if (needsTeamList)  summaryFields.push({ name: 'Team Lists',      value: '#' + channelConfig.channel_team_lists,      inline: true });
     if (needsAdvance)   summaryFields.push({ name: 'Advance Tracker', value: '#' + channelConfig.channel_advance_tracker, inline: true });
