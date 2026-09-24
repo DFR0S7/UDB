@@ -3372,7 +3372,7 @@ Make sure your stream title contains **${reg.title_prefix}** and try again.`,
     if (live.thumbnail) embed.setThumbnail(live.thumbnail);
     if (live.viewerCount != null) embed.addFields({ name: '👥 Viewers', value: String(live.viewerCount), inline: true });
 
-    await streamingChannel.send({ content: `<@${userId}>`, embeds: [embed] });
+    await streamingChannel.send({ content: '@here', embeds: [embed] });
     await interaction.editReply({ content: `✅ Posted your stream to ${streamingChannel}!` });
     setTimeout(() => interaction.deleteReply().catch(() => {}), 8000);
     posted = true;
