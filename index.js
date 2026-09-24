@@ -1380,9 +1380,6 @@ async function handleSetup(interaction) {
         value: `${fv('feature_advance')} Advance`,
         inline: false,
       },
-      {
-        inline: false,
-      },
       { name: '\u200b', value: '\u200b', inline: false },
     ];
 
