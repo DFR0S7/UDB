@@ -757,6 +757,21 @@ function buildCommands() {
       .setName('stream-live')
       .setDescription('Check if you are live and post to the streaming channel.'),
 
+    new SlashCommandBuilder()
+      .setName('stream-list')
+      .setDescription('Show all registered streamers in this server.'),
+
+    new SlashCommandBuilder()
+      .setName('stream-remove-admin')
+      .setDescription('[Admin] Remove a stream registration for any user.')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addUserOption(o => o.setName('user').setDescription('The coach to remove').setRequired(true))
+      .addStringOption(o => o.setName('platform').setDescription('Platform to remove').setRequired(false)
+        .addChoices(
+          { name: 'YouTube', value: 'youtube' },
+          { name: 'Twitch',  value: 'twitch'  },
+        )),
+
   ].map(cmd => cmd.toJSON());
 }
 
@@ -3389,6 +3404,67 @@ If you just started streaming, wait 30 seconds and try again.`,
   }
 }
 
+// /stream-list ────────────────────────────────────────────────────────────
+async function handleStreamList(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+  if (!config.feature_stream) return interaction.editReply({ content: '❌ Streaming is not enabled on this server.' });
+
+  const { data: regs } = await supabase
+    .from('stream_registrations')
+    .select('*')
+    .eq('guild_id', guildId)
+    .order('created_at', { ascending: true });
+
+  if (!regs?.length) return interaction.editReply({ content: '❌ No streamers registered yet. Coaches can register with `/stream-register`.' });
+
+  const lines = regs.map(r => {
+    const icon = r.platform === 'twitch' ? '🟣' : '🔴';
+    const link = r.platform === 'twitch'
+      ? `https://twitch.tv/${r.channel_id}`
+      : `https://youtube.com/@${r.channel_id}`;
+    return `${icon} <@${r.user_id}> — [${r.channel_id}](${link})`;
+  });
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📺 Registered Streamers — ${config.league_name}`)
+    .setColor(config.embed_color_primary_int || 0x1e90ff)
+    .setDescription(lines.join('\n'))
+    .setFooter({ text: `${regs.length} streamer(s) registered` })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+// /stream-remove-admin ────────────────────────────────────────────────────
+async function handleStreamRemoveAdmin(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId  = interaction.guildId;
+  const isAdmin  = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
+
+  const target   = interaction.options.getUser('user');
+  const platform = interaction.options.getString('platform');
+
+  const regs = await listStreamRegistrations(guildId, target.id);
+  if (!regs.length) return interaction.editReply({ content: `❌ <@${target.id}> has no stream registrations in this server.` });
+
+  if (platform) {
+    // Remove specific platform
+    const match = regs.find(r => r.platform === platform);
+    if (!match) return interaction.editReply({ content: `❌ <@${target.id}> has no ${platform} registration.` });
+    await deleteStreamRegistration(guildId, target.id, platform);
+    return interaction.editReply({ content: `✅ Removed <@${target.id}>'s ${platform} registration (\`${match.channel_id}\`).` });
+  }
+
+  // Remove all registrations for that user
+  for (const reg of regs) {
+    await deleteStreamRegistration(guildId, target.id, reg.platform);
+  }
+  await interaction.editReply({ content: `✅ Removed all stream registrations for <@${target.id}>.` });
+}
+
 // /current-week ───────────────────────────────────────────────────────────
 async function handleCurrentWeek(interaction) {
   await interaction.deferReply({ flags: 64 });
@@ -4647,6 +4723,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'stream-admin':        return handleStreamAdmin(interaction);
         case 'stream-remove':       return handleStreamRemove(interaction);
         case 'stream-live':         return handleStreamLive(interaction);
+        case 'stream-list':         return handleStreamList(interaction);
+        case 'stream-remove-admin': return handleStreamRemoveAdmin(interaction);
         case 'league-list':         return handleLeagueList(interaction);
         case 'add-league':          return handleAddLeague(interaction);
         case 'move-coach':        return handleMoveCoach(interaction);
