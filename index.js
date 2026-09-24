@@ -1190,10 +1190,10 @@ async function handleSetup(interaction) {
     channel_advance_tracker: 'advance-tracker',
   };
 
-  const needsNewsFeed  = needsSigned || needsAdvance; // News feed needed for coach announcements and advance posts
   const needsSigned    = features.feature_job_offers || features.feature_assign_team;
   const needsTeamList  = features.feature_list_teams;
   const needsAdvance   = features.feature_advance;
+  const needsNewsFeed  = needsSigned || needsAdvance; // News feed needed for coach announcements and advance posts
 
   if (needsNewsFeed || needsSigned || needsTeamList || needsAdvance) {
     await dm.send('**— Channel Setup —**\nSelect the channel for each feature group.');
