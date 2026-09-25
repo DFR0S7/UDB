@@ -771,9 +771,21 @@ function buildCommands() {
       .setDescription('Remove your stream registration.'),
 
     new SlashCommandBuilder()
+      .setName('stream-scan')
+      .setDescription('[Admin] Scan this channel for stream links and register them.')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addIntegerOption(o => o.setName('limit').setDescription('How many messages to scan (default 50, max 200)').setRequired(false).setMinValue(10).setMaxValue(200)),
+
+    new SlashCommandBuilder()
       .setName('stream-live')
       .setDescription('Check if you are live and post to the streaming channel.')
       .addUserOption(o => o.setName('user').setDescription('[Admin] Check a specific coach instead of yourself').setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('stream-scan')
+      .setDescription('[Admin] Scan this channel for stream links and register them.')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addIntegerOption(o => o.setName('limit').setDescription('How many messages to scan (default 50, max 200)').setRequired(false).setMinValue(1).setMaxValue(200)),
 
     new SlashCommandBuilder()
       .setName('stream-list')
@@ -3291,6 +3303,95 @@ async function handleStreamRemoveAdmin(interaction) {
   await interaction.editReply({ content: `✅ Removed all stream registrations for <@${target.id}>.` });
 }
 
+// /stream-scan ────────────────────────────────────────────────────────────
+async function handleStreamScan(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+  if (!config.feature_stream) return interaction.editReply({ content: '❌ Streaming is not enabled on this server.' });
+
+  const limit   = interaction.options.getInteger('limit') || 50;
+  const channel = interaction.channel;
+
+  await interaction.editReply({ content: `🔍 Scanning last **${limit}** messages in <#${channel.id}> for stream links...` });
+
+  // Fetch messages in batches (Discord max 100 per fetch)
+  let messages = [];
+  try {
+    const first = await channel.messages.fetch({ limit: Math.min(limit, 100) });
+    messages = [...first.values()];
+    if (limit > 100 && messages.length === 100) {
+      const oldest = messages[messages.length - 1].id;
+      const more   = await channel.messages.fetch({ limit: limit - 100, before: oldest });
+      messages = messages.concat([...more.values()]);
+    }
+  } catch (err) {
+    return interaction.editReply({ content: `❌ Could not read messages: ${err.message}` });
+  }
+
+  const streamRegex = /https?:\/\/(?:www\.)?(?:twitch\.tv\/[a-zA-Z0-9_]+|youtube\.com\/(?:@[a-zA-Z0-9_\-]+|live\/[a-zA-Z0-9_\-]+|watch\?v=[a-zA-Z0-9_\-]+|channel\/[a-zA-Z0-9_\-]+|c\/[a-zA-Z0-9_\-]+)|youtu\.be\/[a-zA-Z0-9_\-]+)/gi;
+
+  const found   = [];
+  const seenLinks = new Set();
+
+  for (const msg of messages) {
+    const links = [...(msg.content.match(streamRegex) || [])];
+    for (const embed of msg.embeds) {
+      const txt = [embed.url, embed.description, ...(embed.fields || []).map(f => f.value)].filter(Boolean).join(' ');
+      links.push(...(txt.match(streamRegex) || []));
+    }
+
+    for (const link of links) {
+      const key = link.toLowerCase();
+      if (seenLinks.has(key)) continue;
+      seenLinks.add(key);
+      const parsed = parseStreamLink(link);
+      if (!parsed) continue;
+      // Skip duplicates — check if this user already has this platform registered
+      const existing = await getStreamRegistration(guildId, msg.author.id, parsed.platform);
+      if (existing) continue;
+      found.push({ link, parsed, userId: msg.author.id, username: msg.author.username, bot: msg.author.bot });
+    }
+  }
+
+  if (!found.length) {
+    return interaction.editReply({ content: `✅ Scanned **${messages.length}** messages — no new unregistered stream links found.` });
+  }
+
+  const league   = await getLeagueFromInteraction(interaction);
+  const leagueId = league?.league_id || null;
+  const prefix   = config.league_abbreviation || null;
+
+  const autoRegister = found.filter(f => !f.bot);
+  const needsConfirm = found.filter(f => f.bot);
+  let registered = 0;
+  const failed   = [];
+
+  for (const item of autoRegister) {
+    try {
+      await saveStreamRegistration({ guildId, leagueId, userId: item.userId, platform: item.parsed.platform, channelId: item.parsed.channelId, titlePrefix: prefix });
+      registered++;
+    } catch { failed.push(item); }
+  }
+
+  const lines = [`✅ Scanned **${messages.length}** messages.`];
+  if (registered > 0) {
+    lines.push(`\n**Registered ${registered} stream(s):**`);
+    autoRegister.filter(i => !failed.includes(i)).forEach(i =>
+      lines.push(`• <@${i.userId}> — ${i.parsed.platform}: \`${i.parsed.channelId}\``)
+    );
+  }
+  if (needsConfirm.length) {
+    lines.push(`\n**${needsConfirm.length} found in bot messages — register manually with \`/stream-admin\`:**`);
+    needsConfirm.forEach(i => lines.push(`• ${i.parsed.platform}: \`${i.parsed.channelId}\``));
+  }
+  if (failed.length) {
+    lines.push(`\n**${failed.length} failed** — try \`/stream-admin\` manually.`);
+  }
+
+  await interaction.editReply({ content: lines.join('\n') });
+}
+
 // /stream-my ──────────────────────────────────────────────────────────────
 async function handleStreamMy(interaction) {
   await interaction.deferReply({ flags: 64 });
@@ -4992,7 +5093,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'stream-register':     return handleStreamRegister(interaction);
         case 'stream-admin':        return handleStreamAdmin(interaction);
         case 'stream-remove':       return handleStreamRemove(interaction);
+        case 'stream-scan':         return handleStreamScan(interaction);
         case 'stream-live':         return handleStreamLive(interaction);
+        case 'stream-scan':         return handleStreamScan(interaction);
         case 'stream-list':         return handleStreamList(interaction);
         case 'stream-my':           return handleStreamMy(interaction);
         case 'stream-remove-admin': return handleStreamRemoveAdmin(interaction);
