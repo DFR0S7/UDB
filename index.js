@@ -2983,34 +2983,19 @@ async function checkYouTubeLive(channelId) {
     } catch (err) { console.error('[youtube] Handle resolution error:', err.message); return null; }
   }
 
-  // Step 1: Check liveBroadcastContent on the channel itself — most reliable
-  const channelUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet,status&id=${encodeURIComponent(resolvedChannelId)}&key=${YOUTUBE_API_KEY}`;
-  try {
-    const cRes  = await fetch(channelUrl);
-    const cData = await cRes.json();
-    if (cData.error) { console.error('[youtube] Channel check error:', cData.error.message); return null; }
-    const channel = cData.items?.[0];
-    if (!channel) { console.warn(`[youtube] Channel ${resolvedChannelId} not found`); return null; }
-    const broadcastContent = channel.snippet?.liveBroadcastContent;
-    console.log(`[youtube] Channel ${resolvedChannelId} liveBroadcastContent: ${broadcastContent}`);
-    if (broadcastContent !== 'live') {
-      console.log('[youtube] Channel is not currently live');
-      return null;
-    }
-  } catch (err) { console.error('[youtube] Channel status check error:', err.message); return null; }
-
-  // Step 2: Channel is live — find the active stream video
+  // Search for active live stream directly — liveBroadcastContent from channels API is unreliable
   const liveUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${encodeURIComponent(resolvedChannelId)}&eventType=live&type=video&key=${YOUTUBE_API_KEY}&maxResults=1`;
   try {
     const res  = await fetch(liveUrl);
     const data = await res.json();
     if (data.error) { console.error('[youtube] Live search error:', data.error.message); return null; }
+    console.log(`[youtube] Live search for ${resolvedChannelId} returned ${data.items?.length ?? 0} result(s)`);
     if (!data.items?.length) {
-      // Channel is live but search didn't return the video yet — return a generic live result
-      console.log('[youtube] Live confirmed but search index not ready — using channel URL');
+      // Search index can lag for very new streams — return channel URL as fallback so post still goes out
+      console.log('[youtube] No live video in search index yet — using channel URL fallback');
       return {
-        title:        'Live Stream',
-        url:          `https://www.youtube.com/@${channelId}`,
+        title:        'Live Now',
+        url:          `https://www.youtube.com/@${channelId.replace(/^@/, '')}`,
         thumbnail:    null,
         channelTitle: channelId,
       };
@@ -3025,6 +3010,7 @@ async function checkYouTubeLive(channelId) {
     };
   } catch (err) { console.error('[youtube] Live search error:', err.message); return null; }
 }
+
 
 // Twitch OAuth token cache
 let twitchToken = null;
