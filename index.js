@@ -65,7 +65,7 @@ const client = new Client({
 // =====================================================
 const PHASE_CYCLE = [
   { key: 'preseason',           name: 'Preseason',               subWeeks: 1,  startSub: 0, format: ()    => 'Preseason' },
-  { key: 'regular',             name: 'Regular Season',          subWeeks: 16, startSub: 0, format: (sub) => `Week ${sub}` },
+  { key: 'regular',             name: 'Regular Season',          subWeeks: 15, startSub: 0, format: (sub) => `Week ${sub}` },
   { key: 'conf_champ',          name: 'Conference Championship', subWeeks: 1,  startSub: 0, format: ()    => 'Conference Championship' },
   { key: 'bowl',                name: 'Bowl Season',             subWeeks: 4,  startSub: 0, format: (sub) => {
     const labels = ['Bowl Week 1', 'Bowl Week 2', 'Semifinals', 'National Championship'];
@@ -772,7 +772,8 @@ function buildCommands() {
 
     new SlashCommandBuilder()
       .setName('stream-live')
-      .setDescription('Check if you are live and post to the streaming channel.'),
+      .setDescription('Check if you are live and post to the streaming channel.')
+      .addUserOption(o => o.setName('user').setDescription('[Admin] Check a specific coach instead of yourself').setRequired(false)),
 
     new SlashCommandBuilder()
       .setName('stream-list')
@@ -1681,79 +1682,6 @@ async function handleConfigEdit(interaction) {
 }
 
 // /config timezones ─────────────────────────────────────
-async function handleConfigTimezones(interaction) {
-  await interaction.deferReply({ flags: 64 });
-  const guildId = interaction.guildId;
-  const config  = await getConfig(guildId);
-
-  const TZ_OPTIONS = [
-    { id: 'ET',   label: '🌴 ET  (New York)'    },
-    { id: 'CT',   label: '🐄 CT  (Chicago)'     },
-    { id: 'MT',   label: '🏔️ MT  (Denver)'      },
-    { id: 'PT',   label: '🌊 PT  (Los Angeles)' },
-    { id: 'GMT',  label: '🌐 GMT (London)'      },
-    { id: 'AEST', label: '🦘 AEST (Sydney)'     },
-    { id: 'NZST', label: '🥝 NZST (Auckland)'  },
-  ];
-
-  const current = config.advance_timezones_parsed || ['ET','CT','MT','PT'];
-  const selected = new Set(current);
-
-  const buildRows = () => {
-    const rows = [];
-    for (let i = 0; i < TZ_OPTIONS.length; i += 4) {
-      rows.push(new ActionRowBuilder().addComponents(
-        TZ_OPTIONS.slice(i, i + 4).map(tz =>
-          new ButtonBuilder()
-            .setCustomId(`tz_${tz.id}`)
-            .setLabel((selected.has(tz.id) ? '✅ ' : '') + tz.label)
-            .setStyle(selected.has(tz.id) ? ButtonStyle.Success : ButtonStyle.Secondary)
-        )
-      ));
-    }
-    rows.push(new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('tz_DONE').setLabel('✔ Save').setStyle(ButtonStyle.Primary),
-    ));
-    return rows;
-  };
-
-  const msg = await interaction.editReply({
-    content: '📡 **Advance Timezones**\nToggle which timezones appear on advance deadline posts, then click **Save**.',
-    components: buildRows(),
-  });
-
-  const collector = msg.createMessageComponentCollector({
-    filter: i => i.user.id === interaction.user.id,
-    time: 120000,
-  });
-
-  collector.on('collect', async btn => {
-    const id = btn.customId.replace('tz_', '');
-    if (id === 'DONE') {
-      collector.stop('done');
-      const finalTZs = [...selected];
-      if (finalTZs.length === 0) {
-        await btn.update({ content: '❌ You must select at least one timezone.', components: buildRows() });
-        return;
-      }
-      await saveConfig(guildId, { advance_timezones: JSON.stringify(finalTZs) });
-      guildConfigs.delete(guildId);
-      const labels = finalTZs.map(k => TZ_OPTIONS.find(t => t.id === k)?.label || k).join(', ');
-      await btn.update({ content: `✅ **Timezones saved:** ${labels}`, components: [] });
-    } else {
-      selected.has(id) ? selected.delete(id) : selected.add(id);
-      await btn.update({ components: buildRows() });
-    }
-  });
-
-  collector.on('end', async (_, reason) => {
-    if (reason !== 'done') {
-      await interaction.editReply({ content: '⏰ Timed out — timezones not saved.', components: [] }).catch(() => {});
-    }
-  });
-}
-
-// /config reload ──────────────────────────────────────
 async function handleConfigReload(interaction) {
   await interaction.deferReply({ flags: 64 });
   guildConfigs.delete(interaction.guildId);
@@ -2535,7 +2463,6 @@ async function handleAdvance(interaction) {
   // depending on their schedule. Each advance gets its own prompt.
   const skipWeekPrompts = [
     { triggerSub: 13, weekLabel: 'Week 14', continueId: 'advance_continue14', skipId: 'advance_skip14' },
-    { triggerSub: 14, weekLabel: 'Week 15', continueId: 'advance_continue15', skipId: 'advance_skip15' },
   ];
 
   for (const { triggerSub, weekLabel, continueId, skipId } of skipWeekPrompts) {
@@ -2682,174 +2609,6 @@ async function handleMoveCoach(interaction) {
 
 
 // /offers-config ─────────────────────────────────────────────────────────
-async function handleOffersConfig(interaction) {
-  await interaction.deferReply({ flags: 64 });
-  const guildId = interaction.guildId;
-  const config  = await getConfig(guildId);
-  const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
-  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
-
-  await showOffersConfigMenu(interaction, guildId, config);
-}
-
-async function showOffersConfigMenu(interaction, guildId, config, edit = false) {
-  const offerCfg = await getJobOfferConfig(guildId);
-  const whitelist = await getJobOfferConferences(guildId, 'whitelist');
-  const blacklist = await getJobOfferConferences(guildId, 'blacklist');
-
-  const weightLabel = offerCfg.weighted_ratings === 'highest' ? '⭐ Weighted: Highest'
-                    : offerCfg.weighted_ratings === 'lowest'  ? '⭐ Weighted: Lowest'
-                    : '⭐ Weighted: Off';
-
-  const embed = new EmbedBuilder()
-    .setTitle('⚙️ Job Offer Configuration')
-    .setColor(config.embed_color_primary_int || 0x1e90ff)
-    .setDescription('Toggle rules that apply when generating job offers. FCS teams are always excluded.')
-    .addFields(
-      { name: '🚫 Max 1 Per Conference', value: offerCfg.one_per_conference ? '✅ On'  : '❌ Off', inline: true },
-      { name: '⚖️ Conference Balance',   value: offerCfg.conf_balance       ? '✅ On'  : '❌ Off', inline: true },
-      { name: weightLabel,               value: offerCfg.weighted_ratings === 'off' ? '❌ Off' : '✅ On', inline: true },
-      { name: '✅ Whitelist',            value: whitelist.length > 0 ? whitelist.join(', ') : 'None (all allowed)', inline: true },
-      { name: '🚫 Blacklist',            value: blacklist.length > 0 ? blacklist.join(', ') : 'None',               inline: true },
-    );
-
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('ofc_one_per_conf')
-      .setLabel(offerCfg.one_per_conference ? '✅ 1 Per Conference' : '❌ 1 Per Conference')
-      .setStyle(offerCfg.one_per_conference ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId('ofc_balance')
-      .setLabel(offerCfg.conf_balance ? '✅ Conf Balance' : '❌ Conf Balance')
-      .setStyle(offerCfg.conf_balance ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId('ofc_weighted')
-      .setLabel(weightLabel)
-      .setStyle(offerCfg.weighted_ratings !== 'off' ? ButtonStyle.Success : ButtonStyle.Secondary),
-  );
-
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('ofc_whitelist')
-      .setLabel(`✅ Manage Whitelist${whitelist.length > 0 ? ` (${whitelist.length})` : ''}`)
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId('ofc_blacklist')
-      .setLabel(`🚫 Manage Blacklist${blacklist.length > 0 ? ` (${blacklist.length})` : ''}`)
-      .setStyle(ButtonStyle.Primary),
-  );
-
-  const payload = { embeds: [embed], components: [row1, row2] };
-  const msg = edit
-    ? await interaction.editReply(payload)
-    : await interaction.editReply(payload);
-
-  // Collect button interaction
-  try {
-    const btn = await msg.awaitMessageComponent({
-      filter: i => i.user.id === interaction.user.id,
-      time: 120000,
-    });
-    await btn.deferUpdate();
-
-    if (btn.customId === 'ofc_one_per_conf') {
-      await setJobOfferConfig(guildId, { one_per_conference: !offerCfg.one_per_conference });
-      await showOffersConfigMenu(interaction, guildId, config, true);
-
-    } else if (btn.customId === 'ofc_balance') {
-      await setJobOfferConfig(guildId, { conf_balance: !offerCfg.conf_balance });
-      await showOffersConfigMenu(interaction, guildId, config, true);
-
-    } else if (btn.customId === 'ofc_weighted') {
-      // Cycle: off → highest → lowest → off
-      const next = offerCfg.weighted_ratings === 'off'     ? 'highest'
-                 : offerCfg.weighted_ratings === 'highest' ? 'lowest'
-                 : 'off';
-      await setJobOfferConfig(guildId, { weighted_ratings: next });
-      await showOffersConfigMenu(interaction, guildId, config, true);
-
-    } else if (btn.customId === 'ofc_whitelist') {
-      await showConferenceToggleMenu(interaction, guildId, config, 'whitelist');
-
-    } else if (btn.customId === 'ofc_blacklist') {
-      await showConferenceToggleMenu(interaction, guildId, config, 'blacklist');
-    }
-
-  } catch {
-    await interaction.editReply({ embeds: [embed], components: [] });
-  }
-}
-
-async function showConferenceToggleMenu(interaction, guildId, config, mode) {
-  const conferences = await getDistinctConferences();
-  const active      = await getJobOfferConferences(guildId, mode);
-  const modeLabel   = mode === 'whitelist' ? '✅ Whitelist' : '🚫 Blacklist';
-  const modeDesc    = mode === 'whitelist'
-    ? 'Only these conferences will appear in job offers. If empty, all are allowed.'
-    : 'These conferences will never appear in job offers.';
-
-  if (conferences.length === 0) {
-    await interaction.editReply({ content: '❌ No conferences found in the teams database.', components: [] });
-    return;
-  }
-
-  // Build toggle buttons — up to 25 (5 rows of 5)
-  const buttons = conferences.slice(0, 20).map(conf =>
-    new ButtonBuilder()
-      .setCustomId(`ofc_conf_${mode}_${conf}`)
-      .setLabel(active.includes(conf) ? `✅ ${conf}` : conf)
-      .setStyle(active.includes(conf) ? ButtonStyle.Success : ButtonStyle.Secondary)
-  );
-
-  // Add a Back button at the end
-  buttons.push(
-    new ButtonBuilder()
-      .setCustomId('ofc_back')
-      .setLabel('← Back')
-      .setStyle(ButtonStyle.Primary)
-  );
-
-  // Chunk into rows of 5
-  const rows = [];
-  for (let i = 0; i < buttons.length; i += 5) {
-    rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
-  }
-
-  const embed = new EmbedBuilder()
-    .setTitle(`${modeLabel} Conferences`)
-    .setColor(config.embed_color_primary_int || 0x1e90ff)
-    .setDescription(`${modeDesc}\n\nCurrently active: ${active.length > 0 ? active.join(', ') : 'None'}`);
-
-  const msg = await interaction.editReply({ embeds: [embed], components: rows });
-
-  try {
-    const btn = await msg.awaitMessageComponent({
-      filter: i => i.user.id === interaction.user.id,
-      time: 120000,
-    });
-    await btn.deferUpdate();
-
-    if (btn.customId === 'ofc_back') {
-      await showOffersConfigMenu(interaction, guildId, config, true);
-      return;
-    }
-
-    // Parse conference from customId: ofc_conf_{mode}_{conference}
-    const parts = btn.customId.split('_');
-    // customId format: ofc_conf_whitelist_Big Ten  (conference name may have spaces replaced)
-    const confName = conferences.find(c => `ofc_conf_${mode}_${c}` === btn.customId);
-    if (confName) {
-      await toggleJobOfferConference(guildId, confName, mode);
-    }
-
-    // Re-show the same screen to allow multiple toggles
-    await showConferenceToggleMenu(interaction, guildId, config, mode);
-
-  } catch {
-    await interaction.editReply({ embeds: [embed], components: [] });
-  }
-}
-
 // /rollback-advance ───────────────────────────────────────────────────────
 async function handleRollbackAdvance(interaction) {
   await interaction.deferReply({ flags: 64 });
@@ -2929,11 +2688,11 @@ async function handleRollbackAdvance(interaction) {
   let targetSub   = 0;
 
   if (phaseChoice === 'regular') {
-    const weekStr = await ask(`**[Step 3/4]** What week of the regular season? (1–16)\nExample: 8`);
+    const weekStr = await ask(`**[Step 3/4]** What week of the regular season? (0–14)\nExample: 8`);
     if (!weekStr) return dm.send('⏰ Timed out — rollback cancelled.');
     const parsed = parseInt(weekStr);
-    if (isNaN(parsed) || parsed < 1 || parsed > 16) return dm.send('❌ Invalid week (1–16). Rollback cancelled.');
-    targetSub = parsed - 1; // sub is 0-indexed; Week 1 = sub 0, Week 8 = sub 7, etc.
+    if (isNaN(parsed) || parsed < 0 || parsed > 14) return dm.send('❌ Invalid week (0–14). Rollback cancelled.');
+    targetSub = parsed; // sub matches week directly (Week 0 = sub 0, Week 14 = sub 14)
   } else if (phaseChoice === 'bowl') {
     const bowlChoice = await askButtons('**[Step 3/4]** Which bowl week?', [
       { id: '0', label: 'Bowl Week 1' },
@@ -3380,14 +3139,23 @@ async function handleStreamRemove(interaction) {
 
 async function handleStreamLive(interaction) {
   await interaction.deferReply({ flags: 64 });
-  const guildId = interaction.guildId;
-  const userId  = interaction.user.id;
-  const config  = await getConfig(guildId);
+  const guildId    = interaction.guildId;
+  const config     = await getConfig(guildId);
+  const targetUser = interaction.options.getUser('user');
+  const isAdmin    = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+
+  // Only admins can check on behalf of another user
+  if (targetUser && !isAdmin) return interaction.editReply({ content: '❌ Only admins can check another user\'s stream.' });
+  const userId = targetUser ? targetUser.id : interaction.user.id;
 
   if (!config.feature_stream) return interaction.editReply({ content: '❌ Streaming is not enabled on this server.' });
 
   const regs = await listStreamRegistrations(guildId, userId);
-  if (!regs.length) return interaction.editReply({ content: '❌ You have no stream registered. Run `/stream-register` with your YouTube link first.' });
+  if (!regs.length) return interaction.editReply({
+    content: targetUser
+      ? `❌ <@${userId}> has no stream registered in this server.`
+      : '❌ You have no stream registered. Run `/stream-register` with your Twitch or YouTube link first.',
+  });
 
   const streamingChannel = findTextChannel(interaction.guild, config.channel_streaming);
   if (!streamingChannel) return interaction.editReply({ content: `❌ Streaming channel \`${config.channel_streaming}\` not found. Ask an admin to check the config.` });
@@ -3564,127 +3332,376 @@ async function handleConfigWizard(interaction) {
   if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
   if (!config.setup_complete) return replySetupRequired(interaction);
 
-  let dm;
-  try { dm = await interaction.user.createDM(); }
-  catch { return interaction.editReply({ content: '❌ Could not open a DM. Please allow DMs from server members.' }); }
-  await interaction.editReply({ content: '📬 Check your DMs — config wizard is starting.' });
-
-  const askButtons = async (prompt, buttons) => {
-    const rows = [];
-    for (let i = 0; i < buttons.length; i += 5) {
-      rows.push(new ActionRowBuilder().addComponents(
-        buttons.slice(i, i + 5).map(b => new ButtonBuilder()
-          .setCustomId(b.id).setLabel(b.label).setStyle(b.style || ButtonStyle.Secondary))
-      ));
-    }
-    const msg = await dm.send({ content: prompt, components: rows });
-    try {
-      const btn = await msg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
-      await btn.update({ components: [] });
-      return btn.customId;
-    } catch { await msg.edit({ components: [] }); return null; }
-  };
-
-  const pickChannel = async (label, channels) => {
-    const list = channels.slice(0, 24);
-    const rows = [];
-    for (let i = 0; i < list.length; i += 5) {
-      rows.push(new ActionRowBuilder().addComponents(
-        list.slice(i, i + 5).map(ch => new ButtonBuilder()
-          .setCustomId(`ch_${ch.id}`).setLabel('#' + ch.name).setStyle(ButtonStyle.Secondary))
-      ));
-    }
-    rows.push(new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('ch_skip').setLabel('Skip').setStyle(ButtonStyle.Primary)
-    ));
-    const msg = await dm.send({ content: label, components: rows });
-    try {
-      const btn = await msg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
-      await btn.update({ components: [] });
-      if (btn.customId === 'ch_skip') return null;
-      return interaction.guild.channels.cache.get(btn.customId.replace('ch_', ''));
-    } catch { await msg.edit({ components: [] }); return null; }
-  };
-
-  const textChannels = [...interaction.guild.channels.cache
+  const guild = interaction.guild;
+  const textChannels = [...guild.channels.cache
     .filter(c => c.type === 0)
     .sort((a, b) => a.name.localeCompare(b.name))
     .values()];
+  const roles = [...guild.roles.cache
+    .filter(r => !r.managed && r.name !== '@everyone')
+    .sort((a, b) => b.position - a.position)
+    .values()];
 
-  // ── Choose section ─────────────────────────────────────────────────────
-  const section = await askButtons(
-    `⚙️ **Config Wizard — ${config.league_name}**
+  // ── Shared helpers ─────────────────────────────────────────────────────
+  const buildMainMenu = () => [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('wiz_channels').setLabel('📺 Channels').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('wiz_features').setLabel('🔧 Features').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('wiz_settings').setLabel('✏️ Edit Setting').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('wiz_offers').setLabel('🏈 Job Offers').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('wiz_role').setLabel('👤 Role').setStyle(ButtonStyle.Secondary),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('wiz_done').setLabel('✅ Done').setStyle(ButtonStyle.Success),
+    ),
+  ];
 
-Which section would you like to update?`,
-    [
-      { id: 'channels',  label: '📺 Channels',       style: ButtonStyle.Primary },
-      { id: 'features',  label: '🔧 Features',        style: ButtonStyle.Primary },
-      { id: 'advance',   label: '📅 Advance Settings', style: ButtonStyle.Primary },
-      { id: 'role',      label: '👤 Head Coach Role',  style: ButtonStyle.Secondary },
-      { id: 'done',      label: '✅ Done',             style: ButtonStyle.Success },
-    ]
+  const backRow = () => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('wiz_back').setLabel('← Back').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('wiz_done').setLabel('✅ Done').setStyle(ButtonStyle.Success),
   );
-  if (!section || section === 'done') return dm.send('👍 Config wizard closed. Use `/config edit` for individual settings.');
 
-  if (section === 'channels') {
-    const updates = {};
-    const signed = await pickChannel('✍️ **Signed Coaches Channel** — Where should coach signing announcements post?', textChannels);
-    if (signed) updates.channel_signed_coaches = signed.name;
-    const teamList = await pickChannel('📋 **Team Lists Channel** — Where should the team list post?', textChannels);
-    if (teamList) updates.channel_team_lists = teamList.name;
-    const advance = await pickChannel('⏱️ **Advance Tracker Channel** — Where should advance deadline notices post?', textChannels);
-    if (advance) updates.channel_advance_tracker = advance.name;
-    const streaming = await pickChannel('📺 **Streaming Channel** — Where should live stream posts appear?', textChannels);
-    if (streaming) updates.channel_streaming = streaming.name;
+  const showMain = async (i) => {
+    const method = i.update ? (p) => i.update(p) : (p) => i.editReply(p);
+    await method({ content: `⚙️ **Config Wizard — ${config.league_name}**\nWhat would you like to update?`, components: buildMainMenu() });
+  };
 
-    if (Object.keys(updates).length) {
+  // ── Initial render ─────────────────────────────────────────────────────
+  const msg = await interaction.editReply({
+    content: `⚙️ **Config Wizard — ${config.league_name}**\nWhat would you like to update?`,
+    components: buildMainMenu(),
+  });
+
+  const collector = msg.createMessageComponentCollector({
+    filter: i => i.user.id === interaction.user.id,
+    time: 300000,
+  });
+
+  collector.on('collect', async (btn) => {
+    const id = btn.customId;
+
+    // ── Done ───────────────────────────────────────────────────────────
+    if (id === 'wiz_done') {
+      collector.stop('done');
+      await btn.update({ content: '✅ Config wizard closed.', components: [] });
+      return;
+    }
+
+    // ── Back to main ───────────────────────────────────────────────────
+    if (id === 'wiz_back') { await showMain(btn); return; }
+
+    // ── Channels ───────────────────────────────────────────────────────
+    if (id === 'wiz_channels') {
+      const chButtons = [
+        { id: 'wiz_ch_signed',   label: 'Signed Coaches' },
+        { id: 'wiz_ch_teamlist', label: 'Team Lists' },
+        { id: 'wiz_ch_advance',  label: 'Advance Tracker' },
+        { id: 'wiz_ch_streaming',label: 'Streaming' },
+      ];
+      await btn.update({
+        content: '📺 **Channels** — Which channel would you like to update?',
+        components: [
+          new ActionRowBuilder().addComponents(chButtons.map(b =>
+            new ButtonBuilder().setCustomId(b.id).setLabel(b.label).setStyle(ButtonStyle.Secondary)
+          )),
+          backRow(),
+        ],
+      });
+      return;
+    }
+
+    // Channel pickers
+    const channelMap = {
+      wiz_ch_signed:    { key: 'channel_signed_coaches',  label: 'Signed Coaches' },
+      wiz_ch_teamlist:  { key: 'channel_team_lists',      label: 'Team Lists' },
+      wiz_ch_advance:   { key: 'channel_advance_tracker', label: 'Advance Tracker' },
+      wiz_ch_streaming: { key: 'channel_streaming',       label: 'Streaming' },
+    };
+    if (channelMap[id]) {
+      const { key, label } = channelMap[id];
+      const chList = textChannels.slice(0, 24);
+      const rows = [];
+      for (let i = 0; i < chList.length; i += 5) {
+        rows.push(new ActionRowBuilder().addComponents(
+          chList.slice(i, i + 5).map(ch =>
+            new ButtonBuilder().setCustomId(`wiz_pick_${key}_${ch.id}`).setLabel('#' + ch.name.slice(0,78)).setStyle(ButtonStyle.Secondary)
+          )
+        ));
+      }
+      rows.push(backRow());
+      await btn.update({ content: `📺 **${label} Channel** — Pick a channel:`, components: rows });
+      return;
+    }
+
+    // Channel selection
+    if (id.startsWith('wiz_pick_')) {
+      const parts = id.replace('wiz_pick_', '').split('_');
+      // key is everything before the last segment (channel ID)
+      const channelId = parts[parts.length - 1];
+      const key = parts.slice(0, -1).join('_');
+      const ch = guild.channels.cache.get(channelId);
+      if (ch && key) {
+        await saveConfig(guildId, { [key]: ch.name });
+        guildConfigs.delete(guildId);
+        await btn.update({ content: `✅ **${key.replace(/_/g, ' ')}** updated to **#${ch.name}**.`, components: [backRow()] });
+      }
+      return;
+    }
+
+    // ── Features ───────────────────────────────────────────────────────
+    if (id === 'wiz_features') {
+      const freshConfig = await loadGuildConfig(guildId);
+      const buildFeatureRows = (cfg) => {
+        const rows = [];
+        for (const group of FEATURE_GROUPS) {
+          const allOn  = group.commands.every(c => !!cfg[c.id]);
+          const allOff = group.commands.every(c => !cfg[c.id]);
+          const status = allOn ? '✅' : allOff ? '❌' : '🔧';
+          rows.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`wiz_feat_grp_${group.key}`)
+              .setLabel(`${status} ${group.label}`)
+              .setStyle(allOn ? ButtonStyle.Success : allOff ? ButtonStyle.Danger : ButtonStyle.Secondary)
+          ));
+        }
+        rows.push(backRow());
+        return rows;
+      };
+      await btn.update({
+        content: '🔧 **Features** — Toggle a group on/off or expand to manage individually.\n✅ = all on · ❌ = all off · 🔧 = mixed',
+        components: buildFeatureRows(freshConfig),
+      });
+      return;
+    }
+
+    // Feature group toggle
+    if (id.startsWith('wiz_feat_grp_')) {
+      const groupKey = id.replace('wiz_feat_grp_', '');
+      const group = FEATURE_GROUPS.find(g => g.key === groupKey);
+      if (!group) return;
+      const freshConfig = await loadGuildConfig(guildId);
+      const allOn = group.commands.every(c => !!freshConfig[c.id]);
+      const updates = {};
+      for (const cmd of group.commands) updates[cmd.id] = !allOn;
       await saveConfig(guildId, updates);
       guildConfigs.delete(guildId);
-      await dm.send(`✅ Channels updated:\n${Object.entries(updates).map(([k, v]) => `• ${k}: #${v}`).join('\n')}`);
-    } else {
-      await dm.send('No channels changed.');
+      const newConfig = await loadGuildConfig(guildId);
+      const buildFeatureRows = (cfg) => {
+        const rows = [];
+        for (const g of FEATURE_GROUPS) {
+          const on  = g.commands.every(c => !!cfg[c.id]);
+          const off = g.commands.every(c => !cfg[c.id]);
+          const st  = on ? '✅' : off ? '❌' : '🔧';
+          rows.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`wiz_feat_grp_${g.key}`).setLabel(`${st} ${g.label}`)
+              .setStyle(on ? ButtonStyle.Success : off ? ButtonStyle.Danger : ButtonStyle.Secondary)
+          ));
+        }
+        rows.push(backRow());
+        return rows;
+      };
+      await btn.update({
+        content: `🔧 **Features** — **${group.label}** turned ${allOn ? 'off' : 'on'}.\n✅ = all on · ❌ = all off · 🔧 = mixed`,
+        components: buildFeatureRows(newConfig),
+      });
+      return;
     }
-  }
 
-  if (section === 'features') {
-    await dm.send('Use `/config features` in your server to toggle features on/off — it has a better interface for this than the wizard.');
-  }
-
-  if (section === 'advance') {
-    await dm.send('Use `/config edit setting:advance_intervals` to update your advance hour options, or `/config edit setting:advance_hours` to set a default.');
-  }
-
-  if (section === 'role') {
-    const roles = [...interaction.guild.roles.cache
-      .filter(r => !r.managed && r.name !== '@everyone')
-      .sort((a, b) => b.position - a.position)
-      .values()].slice(0, 20);
-
-    const rows = [];
-    for (let i = 0; i < roles.length; i += 5) {
-      rows.push(new ActionRowBuilder().addComponents(
-        roles.slice(i, i + 5).map(r => new ButtonBuilder()
-          .setCustomId(`role_${r.id}`).setLabel(r.name).setStyle(ButtonStyle.Secondary))
-      ));
+    // ── Edit Setting ───────────────────────────────────────────────────
+    if (id === 'wiz_settings') {
+      await btn.update({
+        content: '✏️ **Edit Setting** — Which category?',
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('wiz_set_teamlist').setLabel('Team List Filter').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('wiz_set_offers').setLabel('Job Offers').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('wiz_set_advance').setLabel('Advance Intervals').setStyle(ButtonStyle.Secondary),
+          ),
+          backRow(),
+        ],
+      });
+      return;
     }
-    rows.push(new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('role_skip').setLabel('Skip / Use @everyone').setStyle(ButtonStyle.Primary)
-    ));
-    const msg = await dm.send({ content: '👤 **Head Coach Role** — Which role should coaches receive?', components: rows });
-    try {
-      const btn = await msg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
-      await btn.update({ components: [] });
-      if (btn.customId !== 'role_skip') {
-        const roleId = btn.customId.replace('role_', '');
-        const role   = interaction.guild.roles.cache.get(roleId);
-        await saveConfig(guildId, { role_head_coach: role.name, role_head_coach_id: roleId });
-        guildConfigs.delete(guildId);
-        await dm.send(`✅ Head coach role updated to **${role.name}**.`);
-      } else {
-        await dm.send('✅ Role left as @everyone (no role assigned).');
+
+    if (id === 'wiz_set_teamlist') {
+      const current = config.team_list_filter || 'all';
+      await btn.update({
+        content: `✏️ **Team List Filter** — Current: **${current}**
+Pick a new default:`,
+        components: [
+          new ActionRowBuilder().addComponents(
+            ['all', 'assigned', 'available', 'conference_view'].map(v =>
+              new ButtonBuilder().setCustomId(`wiz_tlf_${v}`).setLabel(v === current ? `✅ ${v}` : v)
+                .setStyle(v === current ? ButtonStyle.Success : ButtonStyle.Secondary)
+            )
+          ),
+          backRow(),
+        ],
+      });
+      return;
+    }
+
+    if (id.startsWith('wiz_tlf_')) {
+      const val = id.replace('wiz_tlf_', '');
+      await saveConfig(guildId, { team_list_filter: val });
+      guildConfigs.delete(guildId);
+      await btn.update({ content: `✅ **Team List Filter** set to **${val}**.`, components: [backRow()] });
+      return;
+    }
+
+    if (id === 'wiz_set_offers') {
+      await btn.update({
+        content: `✏️ **Job Offers Settings**
+Use \`/config edit\` for these — they require typing values:
+• \`star_rating_for_offers\` — min star rating
+• \`star_rating_max_for_offers\` — max star rating
+• \`job_offers_count\` — offers per batch
+• \`job_offers_expiry_hours\` — hours until expiry`,
+        components: [backRow()],
+      });
+      return;
+    }
+
+    if (id === 'wiz_set_advance') {
+      await btn.update({
+        content: `✏️ **Advance Intervals**
+Use \`/config edit setting:advance_intervals\` to update.
+Example values: \`[24, 48]\` or \`[12, 24, 48]\``,
+        components: [backRow()],
+      });
+      return;
+    }
+
+    // ── Job Offers Config ─────────────────────────────────────────────────
+    if (id === 'wiz_offers') {
+      const offerCfg  = await getJobOfferConfig(guildId);
+      const whitelist = await getJobOfferConferences(guildId, 'whitelist');
+      const blacklist = await getJobOfferConferences(guildId, 'blacklist');
+      const wl = whitelist.length ? whitelist.join(', ') : 'None';
+      const bl = blacklist.length ? blacklist.join(', ') : 'None';
+      await btn.update({
+        content:
+          `🏈 **Job Offers Config**\n\n` +
+          `**Max 1 Per Conference:** ${offerCfg.one_per_conference ? '✅ On' : '❌ Off'}\n` +
+          `**Conference Balance:** ${offerCfg.conf_balance ? '✅ On' : '❌ Off'}\n` +
+          `**Weighted Ratings:** ${offerCfg.weighted_ratings || 'off'}\n` +
+          `**Whitelist:** ${wl}\n` +
+          `**Blacklist:** ${bl}\n\nPick what to change:`,
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('wiz_off_one').setLabel(`1 Per Conf: ${offerCfg.one_per_conference ? 'ON' : 'OFF'}`).setStyle(offerCfg.one_per_conference ? ButtonStyle.Success : ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('wiz_off_bal').setLabel(`Conf Balance: ${offerCfg.conf_balance ? 'ON' : 'OFF'}`).setStyle(offerCfg.conf_balance ? ButtonStyle.Success : ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('wiz_off_weight').setLabel(`Weight: ${offerCfg.weighted_ratings || 'off'}`).setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('wiz_off_wl').setLabel('Whitelist').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('wiz_off_bl').setLabel('Blacklist').setStyle(ButtonStyle.Danger),
+          ),
+          backRow(),
+        ],
+      });
+      return;
+    }
+    if (id === 'wiz_off_one') {
+      const cfg = await getJobOfferConfig(guildId);
+      await setJobOfferConfig(guildId, { one_per_conference: !cfg.one_per_conference });
+      await btn.update({ content: `✅ **Max 1 Per Conference** set to **${!cfg.one_per_conference ? 'ON' : 'OFF'}**.`, components: [backRow()] });
+      return;
+    }
+    if (id === 'wiz_off_bal') {
+      const cfg = await getJobOfferConfig(guildId);
+      await setJobOfferConfig(guildId, { conf_balance: !cfg.conf_balance });
+      await btn.update({ content: `✅ **Conference Balance** set to **${!cfg.conf_balance ? 'ON' : 'OFF'}**.`, components: [backRow()] });
+      return;
+    }
+    if (id === 'wiz_off_weight') {
+      const cfg = await getJobOfferConfig(guildId);
+      const cycle = { off: 'highest', highest: 'lowest', lowest: 'off' };
+      const next = cycle[cfg.weighted_ratings || 'off'];
+      await setJobOfferConfig(guildId, { weighted_ratings: next });
+      await btn.update({ content: `✅ **Weighted Ratings** set to **${next}**.`, components: [backRow()] });
+      return;
+    }
+    if (id === 'wiz_off_wl' || id === 'wiz_off_bl') {
+      const mode = id === 'wiz_off_wl' ? 'whitelist' : 'blacklist';
+      const active = await getJobOfferConferences(guildId, mode);
+      const confs = await getDistinctConferences();
+      const rows = [];
+      for (let i = 0; i < Math.min(confs.length, 20); i += 5) {
+        rows.push(new ActionRowBuilder().addComponents(
+          confs.slice(i, i + 5).map(conf =>
+            new ButtonBuilder().setCustomId(`wiz_conf_${mode}_${conf}`).setLabel(active.includes(conf) ? `✅ ${conf}` : conf).setStyle(active.includes(conf) ? ButtonStyle.Success : ButtonStyle.Secondary)
+          )
+        ));
       }
-    } catch { await dm.send('⏰ Timed out.'); }
-  }
+      rows.push(backRow());
+      await btn.update({ content: `🏈 **${mode.charAt(0).toUpperCase() + mode.slice(1)}** — tap to toggle:`, components: rows });
+      return;
+    }
+    if (id.startsWith('wiz_conf_')) {
+      const withoutPrefix = id.replace('wiz_conf_', '');
+      const modeEnd = withoutPrefix.indexOf('_');
+      const mode = withoutPrefix.slice(0, modeEnd);
+      const conf = withoutPrefix.slice(modeEnd + 1);
+      const nowActive = await toggleJobOfferConference(guildId, conf, mode);
+      const active = await getJobOfferConferences(guildId, mode);
+      const confs = await getDistinctConferences();
+      const rows = [];
+      for (let i = 0; i < Math.min(confs.length, 20); i += 5) {
+        rows.push(new ActionRowBuilder().addComponents(
+          confs.slice(i, i + 5).map(c =>
+            new ButtonBuilder().setCustomId(`wiz_conf_${mode}_${c}`).setLabel(active.includes(c) ? `✅ ${c}` : c).setStyle(active.includes(c) ? ButtonStyle.Success : ButtonStyle.Secondary)
+          )
+        ));
+      }
+      rows.push(backRow());
+      await btn.update({ content: `🏈 **${mode}** — **${conf}** ${nowActive ? 'added' : 'removed'}.`, components: rows });
+      return;
+    }
+
+    // ── Head Coach Role ────────────────────────────────────────────────
+    if (id === 'wiz_role') {
+      const roleList = roles.slice(0, 20);
+      const rows = [];
+      for (let i = 0; i < roleList.length; i += 5) {
+        rows.push(new ActionRowBuilder().addComponents(
+          roleList.slice(i, i + 5).map(r =>
+            new ButtonBuilder().setCustomId(`wiz_role_${r.id}`).setLabel(r.name.slice(0, 80)).setStyle(ButtonStyle.Secondary)
+          )
+        ));
+      }
+      rows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('wiz_role_none').setLabel('Skip / @everyone').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('wiz_back').setLabel('← Back').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('wiz_done').setLabel('✅ Done').setStyle(ButtonStyle.Success),
+      ));
+      const current = config.role_head_coach || 'none';
+      await btn.update({ content: `👤 **Head Coach Role** — Current: **${current}**
+Pick a role:`, components: rows });
+      return;
+    }
+
+    if (id.startsWith('wiz_role_')) {
+      const roleId = id.replace('wiz_role_', '');
+      if (roleId === 'none') {
+        await saveConfig(guildId, { role_head_coach: null, role_head_coach_id: null });
+        guildConfigs.delete(guildId);
+        await btn.update({ content: '✅ Head coach role cleared — using @everyone.', components: [backRow()] });
+      } else {
+        const role = guild.roles.cache.get(roleId);
+        if (role) {
+          await saveConfig(guildId, { role_head_coach: role.name, role_head_coach_id: roleId });
+          guildConfigs.delete(guildId);
+          await btn.update({ content: `✅ Head coach role set to **${role.name}**.`, components: [backRow()] });
+        }
+      }
+      return;
+    }
+  });
+
+  collector.on('end', (_, reason) => {
+    if (reason !== 'done') {
+      msg.edit({ components: [] }).catch(() => {});
+    }
+  });
 }
 
 // /current-week ───────────────────────────────────────────────────────────
@@ -4926,10 +4943,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'setup':             return handleSetup(interaction);
         case 'help':              return handleHelp(interaction);
         case 'checkpermissions':  return handleCheckPermissions(interaction);
-        case 'joboffers':         return handleJobOffers(interaction);
-        case 'offers-config':     return handleOffersConfig(interaction);
+        case 'job-offers':        return handleJobOffers(interaction);
         case 'assign-team':       return handleAssignTeam(interaction);
-        case 'resetteam':         return handleResetTeam(interaction);
+        case 'reset-team':        return handleResetTeam(interaction);
         case 'listteams':         return handleListTeams(interaction);
         case 'advance':           return handleAdvance(interaction);
         case 'set-phase':          return handleSetPhase(interaction);
@@ -4958,7 +4974,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             case 'features': return handleConfigFeatures(interaction);
             case 'edit':     return handleConfigEdit(interaction);
             case 'reload':     return handleConfigReload(interaction);
-            case 'timezones':  return handleConfigTimezones(interaction);
           }
           break;
       }
