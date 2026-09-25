@@ -702,6 +702,11 @@ function buildCommands() {
       .setDescription('Show the current season, phase, and week for this league.'),
 
     new SlashCommandBuilder()
+      .setName('team-info')
+      .setDescription('Look up a team — status, rating, assigned coach, and conference.')
+      .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true)),
+
+    new SlashCommandBuilder()
       .setName('league-list')
       .setDescription('Show all leagues configured in this server.'),
 
@@ -739,15 +744,27 @@ function buildCommands() {
 
     new SlashCommandBuilder()
       .setName('stream-register')
-      .setDescription('Register your Twitch or YouTube stream link.')
-      .addStringOption(o => o.setName('link').setDescription('Your Twitch or YouTube stream URL').setRequired(true)),
+      .setDescription('Register your Twitch or YouTube stream.')
+      .addStringOption(o => o.setName('link').setDescription('Your Twitch or YouTube stream URL (or use handle + platform)').setRequired(false))
+      .addStringOption(o => o.setName('handle').setDescription('Your channel handle or username (e.g. Mr-Dfr0s7)').setRequired(false))
+      .addStringOption(o => o.setName('platform').setDescription('Platform when using handle').setRequired(false)
+        .addChoices(
+          { name: 'YouTube', value: 'youtube' },
+          { name: 'Twitch',  value: 'twitch'  },
+        )),
 
     new SlashCommandBuilder()
       .setName('stream-admin')
-      .setDescription('[Admin] Register a stream link for a specific user.')
+      .setDescription('[Admin] Register a stream for a specific user.')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addStringOption(o => o.setName('link').setDescription('Twitch or YouTube stream URL').setRequired(true))
-      .addUserOption(o => o.setName('user').setDescription('The coach to register for').setRequired(true)),
+      .addUserOption(o => o.setName('user').setDescription('The coach to register for').setRequired(true))
+      .addStringOption(o => o.setName('link').setDescription('Twitch or YouTube stream URL (or use handle + platform)').setRequired(false))
+      .addStringOption(o => o.setName('handle').setDescription('Channel handle or username (e.g. Mr-Dfr0s7)').setRequired(false))
+      .addStringOption(o => o.setName('platform').setDescription('Platform when using handle').setRequired(false)
+        .addChoices(
+          { name: 'YouTube', value: 'youtube' },
+          { name: 'Twitch',  value: 'twitch'  },
+        )),
 
     new SlashCommandBuilder()
       .setName('stream-remove')
@@ -760,6 +777,10 @@ function buildCommands() {
     new SlashCommandBuilder()
       .setName('stream-list')
       .setDescription('Show all registered streamers in this server.'),
+
+    new SlashCommandBuilder()
+      .setName('stream-my')
+      .setDescription('View your own stream registrations.'),
 
     new SlashCommandBuilder()
       .setName('stream-remove-admin')
@@ -2081,6 +2102,23 @@ async function handleAssignTeam(interaction) {
   const oldTeam = await getTeamByUser(user.id, guildId, leagueId);
   if (oldTeam) await unassignTeam(oldTeam.id, guildId, leagueId);
 
+  // Confirmation step
+  const confirmRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('assign_confirm').setLabel('✅ Confirm').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('assign_cancel').setLabel('❌ Cancel').setStyle(ButtonStyle.Secondary)
+  );
+  const confirmMsg = await interaction.editReply({
+    content: `Assign **${team.team_name}** to <@${user.id}>?`,
+    components: [confirmRow],
+  });
+  try {
+    const btn = await confirmMsg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 30000 });
+    await btn.update({ components: [] });
+    if (btn.customId === 'assign_cancel') return interaction.editReply({ content: '↩️ Assignment cancelled.' });
+  } catch {
+    return interaction.editReply({ content: '⏰ Timed out — assignment cancelled.', components: [] });
+  }
+
   await assignTeam(team.id, user.id, guildId, leagueId);
 
   const member = await guild.members.fetch(user.id).catch(() => null);
@@ -2477,8 +2515,7 @@ async function handleAdvance(interaction) {
     });
     try {
       const btn = await promptMsg.awaitMessageComponent({
-        filter: i => i.user.id === interaction.user.id,
-        time: 60000,
+        filter: i => i.user.id === interaction.user.id, time: 120000,
       });
       await btn.update({ components: [] });
       if (btn.customId === 'advance_skip_training') {
@@ -2488,7 +2525,7 @@ async function handleAdvance(interaction) {
       }
       // else continue to Training Results as normal
     } catch {
-      await interaction.editReply({ content: '⏰ No response — advance cancelled. Run `/advance` again.', components: [] });
+      await interaction.editReply({ content: '⏰ No response in 2 minutes — advance cancelled. Run `/advance` again when ready.', components: [] });
       return;
     }
   }
@@ -2519,8 +2556,7 @@ async function handleAdvance(interaction) {
       });
       try {
         const btn = await promptMsg.awaitMessageComponent({
-          filter: i => i.user.id === interaction.user.id,
-          time: 60000,
+          filter: i => i.user.id === interaction.user.id, time: 120000,
         });
         await btn.update({ components: [] });
         if (btn.customId === skipId) {
@@ -2552,7 +2588,11 @@ async function handleAdvance(interaction) {
   const embed = new EmbedBuilder()
     .setTitle(`⏭️ Advance — ${phaseLabel} (Season ${newSeason})`)
     .setColor(config.embed_color_primary_int)
-    .setDescription(`The league is advancing to **${phaseLabel}**!\nAll tasks must be completed within **${hours} hours**.`)
+    .setDescription(
+      `The league is advancing to **${phaseLabel}**!\nAll tasks must be completed within **${hours} hours**.` +
+      (newPhase === 'conf_champ' ? '\n\n📢 **Reminder:** This is your chance to fire your OC/DC!' : '') +
+      (newPhase === 'position_changes' ? '\n\n📢 **Reminder:** Check your player progression setting!' : '')
+    )
     .addFields({
       name: '🕐 Deadline',
       value: deadlineLines || 'No timezones configured.',
@@ -3232,14 +3272,22 @@ async function handleStreamRegister(interaction) {
   await interaction.deferReply({ flags: 64 });
   const guildId = interaction.guildId;
   const userId  = interaction.user.id;
-  const link    = interaction.options.getString('link')?.trim();
   const config  = await getConfig(guildId);
-
   if (!config.feature_stream) return interaction.editReply({ content: '❌ Streaming is not enabled on this server.' });
 
-  const parsed = parseStreamLink(link);
-  if (!parsed) return interaction.editReply({ content: '❌ Could not parse that link. Please paste a valid YouTube URL.' });
-  // Both youtube and twitch supported
+  const link     = interaction.options.getString('link')?.trim();
+  const handle   = interaction.options.getString('handle')?.trim().replace(/^@/, '');
+  const platform = interaction.options.getString('platform');
+
+  let parsed = null;
+  if (link) {
+    parsed = parseStreamLink(link);
+    if (!parsed) return interaction.editReply({ content: '❌ Could not parse that link. Please paste a valid Twitch or YouTube URL.' });
+  } else if (handle && platform) {
+    parsed = { platform, channelId: handle };
+  } else {
+    return interaction.editReply({ content: '❌ Please provide either a **link** or both a **handle** and **platform**.' });
+  }
 
   const league   = await getLeagueFromInteraction(interaction);
   const leagueId = league?.league_id || null;
@@ -3268,12 +3316,20 @@ async function handleStreamAdmin(interaction) {
   if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
   if (!config.feature_stream) return interaction.editReply({ content: '❌ Streaming is not enabled on this server.' });
 
-  const link   = interaction.options.getString('link')?.trim();
-  const target = interaction.options.getUser('user');
-  const parsed = parseStreamLink(link);
+  const target   = interaction.options.getUser('user');
+  const link     = interaction.options.getString('link')?.trim();
+  const handle   = interaction.options.getString('handle')?.trim().replace(/^@/, '');
+  const platform = interaction.options.getString('platform');
 
-  if (!parsed) return interaction.editReply({ content: '❌ Could not parse that link. Please paste a valid YouTube URL.' });
-  // Both youtube and twitch supported
+  let parsed = null;
+  if (link) {
+    parsed = parseStreamLink(link);
+    if (!parsed) return interaction.editReply({ content: '❌ Could not parse that link. Please paste a valid Twitch or YouTube URL.' });
+  } else if (handle && platform) {
+    parsed = { platform, channelId: handle };
+  } else {
+    return interaction.editReply({ content: '❌ Please provide either a **link** or both a **handle** and **platform**.' });
+  }
 
   const league   = await getLeagueFromInteraction(interaction);
   const leagueId = league?.league_id || null;
@@ -3340,23 +3396,12 @@ async function handleStreamLive(interaction) {
   let posted = false;
   for (const reg of regs) {
     const platformLabel = reg.platform === 'youtube' ? 'YouTube' : 'Twitch';
-    await interaction.editReply({ content: `⏳ Checking ${platformLabel} for an active stream...` });
+    await interaction.editReply({ content: `⏳ Checking ${platformLabel} for **${reg.channel_id}**...` });
 
     const live = reg.platform === 'youtube'
       ? await checkYouTubeLive(reg.channel_id)
       : await checkTwitchLive(reg.channel_id);
     if (!live) continue;
-
-    // Check title prefix if configured
-    if (reg.title_prefix && !live.title.toLowerCase().includes(reg.title_prefix.toLowerCase())) {
-      await interaction.editReply({
-        content: `⚠️ Found a live stream but the title doesn't include the league keyword **${reg.title_prefix}**.
-**Stream title:** ${live.title}
-
-Make sure your stream title contains **${reg.title_prefix}** and try again.`,
-      });
-      return;
-    }
 
     const embed = new EmbedBuilder()
       .setTitle(`🔴 ${live.channelTitle} is Live!`)
@@ -3447,9 +3492,204 @@ async function handleStreamRemoveAdmin(interaction) {
   await interaction.editReply({ content: `✅ Removed all stream registrations for <@${target.id}>.` });
 }
 
+// /stream-my ──────────────────────────────────────────────────────────────
+async function handleStreamMy(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const userId  = interaction.user.id;
+  const config  = await getConfig(guildId);
+  if (!config.feature_stream) return interaction.editReply({ content: '❌ Streaming is not enabled on this server.' });
+
+  const regs = await listStreamRegistrations(guildId, userId);
+  if (!regs.length) return interaction.editReply({
+    content: '❌ You have no stream registered. Use `/stream-register` with your Twitch or YouTube link.',
+  });
+
+  const lines = regs.map(r => {
+    const icon = r.platform === 'twitch' ? '🟣 Twitch' : '🔴 YouTube';
+    const link = r.platform === 'twitch'
+      ? `https://twitch.tv/${r.channel_id}`
+      : `https://youtube.com/@${r.channel_id}`;
+    return `**${icon}:** [${r.channel_id}](${link})`;
+  });
+
+  await interaction.editReply({
+    content: `**Your stream registrations in this server:**\n${lines.join('\n')}\n\nRun \`/stream-live\` when you go live.`,
+  });
+}
+
+// /team-info ───────────────────────────────────────────────────────────────
+async function handleTeamInfo(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId  = interaction.guildId;
+  const config   = await getConfig(guildId);
+  if (!config.setup_complete) return replySetupRequired(interaction);
+
+  const teamName = interaction.options.getString('team');
+  const { data: team } = await supabase.from('teams')
+    .select('*, team_assignments(user_id, league_id, custom_conference_id, custom_conferences(tier_name, division_name))')
+    .ilike('team_name', teamName)
+    .maybeSingle();
+
+  if (!team) return interaction.editReply({ content: `❌ Team not found: **${teamName}**` });
+
+  const assignment = (team.team_assignments || []).find(a => a.user_id);
+  const embed = new EmbedBuilder()
+    .setTitle(`🏈 ${team.team_name}`)
+    .setColor(config.embed_color_primary_int || 0x1e90ff)
+    .addFields(
+      { name: 'Conference', value: team.conference || 'Unknown',           inline: true },
+      { name: 'Rating',     value: `${team.star_rating || '?'}⭐`,          inline: true },
+      { name: 'Status',     value: assignment ? `Assigned to <@${assignment.user_id}>` : '🟢 Available', inline: true },
+    );
+
+  if (assignment?.custom_conferences) {
+    embed.addFields({
+      name:  'Division',
+      value: `${assignment.custom_conferences.tier_name} — ${assignment.custom_conferences.division_name}`,
+      inline: true,
+    });
+  }
+
+  embed.setTimestamp();
+  await interaction.editReply({ embeds: [embed] });
+}
+
+// /config-wizard ───────────────────────────────────────────────────────────
+async function handleConfigWizard(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+  const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
+  if (!config.setup_complete) return replySetupRequired(interaction);
+
+  let dm;
+  try { dm = await interaction.user.createDM(); }
+  catch { return interaction.editReply({ content: '❌ Could not open a DM. Please allow DMs from server members.' }); }
+  await interaction.editReply({ content: '📬 Check your DMs — config wizard is starting.' });
+
+  const askButtons = async (prompt, buttons) => {
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 5) {
+      rows.push(new ActionRowBuilder().addComponents(
+        buttons.slice(i, i + 5).map(b => new ButtonBuilder()
+          .setCustomId(b.id).setLabel(b.label).setStyle(b.style || ButtonStyle.Secondary))
+      ));
+    }
+    const msg = await dm.send({ content: prompt, components: rows });
+    try {
+      const btn = await msg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
+      await btn.update({ components: [] });
+      return btn.customId;
+    } catch { await msg.edit({ components: [] }); return null; }
+  };
+
+  const pickChannel = async (label, channels) => {
+    const list = channels.slice(0, 24);
+    const rows = [];
+    for (let i = 0; i < list.length; i += 5) {
+      rows.push(new ActionRowBuilder().addComponents(
+        list.slice(i, i + 5).map(ch => new ButtonBuilder()
+          .setCustomId(`ch_${ch.id}`).setLabel('#' + ch.name).setStyle(ButtonStyle.Secondary))
+      ));
+    }
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('ch_skip').setLabel('Skip').setStyle(ButtonStyle.Primary)
+    ));
+    const msg = await dm.send({ content: label, components: rows });
+    try {
+      const btn = await msg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
+      await btn.update({ components: [] });
+      if (btn.customId === 'ch_skip') return null;
+      return interaction.guild.channels.cache.get(btn.customId.replace('ch_', ''));
+    } catch { await msg.edit({ components: [] }); return null; }
+  };
+
+  const textChannels = [...interaction.guild.channels.cache
+    .filter(c => c.type === 0)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .values()];
+
+  // ── Choose section ─────────────────────────────────────────────────────
+  const section = await askButtons(
+    `⚙️ **Config Wizard — ${config.league_name}**
+
+Which section would you like to update?`,
+    [
+      { id: 'channels',  label: '📺 Channels',       style: ButtonStyle.Primary },
+      { id: 'features',  label: '🔧 Features',        style: ButtonStyle.Primary },
+      { id: 'advance',   label: '📅 Advance Settings', style: ButtonStyle.Primary },
+      { id: 'role',      label: '👤 Head Coach Role',  style: ButtonStyle.Secondary },
+      { id: 'done',      label: '✅ Done',             style: ButtonStyle.Success },
+    ]
+  );
+  if (!section || section === 'done') return dm.send('👍 Config wizard closed. Use `/config edit` for individual settings.');
+
+  if (section === 'channels') {
+    const updates = {};
+    const signed = await pickChannel('✍️ **Signed Coaches Channel** — Where should coach signing announcements post?', textChannels);
+    if (signed) updates.channel_signed_coaches = signed.name;
+    const teamList = await pickChannel('📋 **Team Lists Channel** — Where should the team list post?', textChannels);
+    if (teamList) updates.channel_team_lists = teamList.name;
+    const advance = await pickChannel('⏱️ **Advance Tracker Channel** — Where should advance deadline notices post?', textChannels);
+    if (advance) updates.channel_advance_tracker = advance.name;
+    const streaming = await pickChannel('📺 **Streaming Channel** — Where should live stream posts appear?', textChannels);
+    if (streaming) updates.channel_streaming = streaming.name;
+
+    if (Object.keys(updates).length) {
+      await saveConfig(guildId, updates);
+      guildConfigs.delete(guildId);
+      await dm.send(`✅ Channels updated:\n${Object.entries(updates).map(([k, v]) => `• ${k}: #${v}`).join('\n')}`);
+    } else {
+      await dm.send('No channels changed.');
+    }
+  }
+
+  if (section === 'features') {
+    await dm.send('Use `/config features` in your server to toggle features on/off — it has a better interface for this than the wizard.');
+  }
+
+  if (section === 'advance') {
+    await dm.send('Use `/config edit setting:advance_intervals` to update your advance hour options, or `/config edit setting:advance_hours` to set a default.');
+  }
+
+  if (section === 'role') {
+    const roles = [...interaction.guild.roles.cache
+      .filter(r => !r.managed && r.name !== '@everyone')
+      .sort((a, b) => b.position - a.position)
+      .values()].slice(0, 20);
+
+    const rows = [];
+    for (let i = 0; i < roles.length; i += 5) {
+      rows.push(new ActionRowBuilder().addComponents(
+        roles.slice(i, i + 5).map(r => new ButtonBuilder()
+          .setCustomId(`role_${r.id}`).setLabel(r.name).setStyle(ButtonStyle.Secondary))
+      ));
+    }
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('role_skip').setLabel('Skip / Use @everyone').setStyle(ButtonStyle.Primary)
+    ));
+    const msg = await dm.send({ content: '👤 **Head Coach Role** — Which role should coaches receive?', components: rows });
+    try {
+      const btn = await msg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
+      await btn.update({ components: [] });
+      if (btn.customId !== 'role_skip') {
+        const roleId = btn.customId.replace('role_', '');
+        const role   = interaction.guild.roles.cache.get(roleId);
+        await saveConfig(guildId, { role_head_coach: role.name, role_head_coach_id: roleId });
+        guildConfigs.delete(guildId);
+        await dm.send(`✅ Head coach role updated to **${role.name}**.`);
+      } else {
+        await dm.send('✅ Role left as @everyone (no role assigned).');
+      }
+    } catch { await dm.send('⏰ Timed out.'); }
+  }
+}
+
 // /current-week ───────────────────────────────────────────────────────────
 async function handleCurrentWeek(interaction) {
-  await interaction.deferReply({ flags: 64 });
+  await interaction.deferReply();
   const guildId = interaction.guildId;
   const config  = await getConfig(guildId);
   if (!config.setup_complete) return replySetupRequired(interaction);
@@ -4437,7 +4677,7 @@ async function handleAutocomplete(interaction) {
 
   try {
 
-  if (commandName === 'assign-team' || commandName === 'any-game-result') {
+  if (commandName === 'assign-team' || commandName === 'any-game-result' || commandName === 'team-info') {
     const { data: teams, error } = await supabase
       .from('teams')
       .select('id, team_name, conference, star_rating')
@@ -4701,11 +4941,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         case 'set-conference':      return handleSetConference(interaction);
         case 'promote-relegate':    return handlePromoteRelegate(interaction);
         case 'current-week':        return handleCurrentWeek(interaction);
+        case 'team-info':           return handleTeamInfo(interaction);
         case 'stream-register':     return handleStreamRegister(interaction);
         case 'stream-admin':        return handleStreamAdmin(interaction);
         case 'stream-remove':       return handleStreamRemove(interaction);
         case 'stream-live':         return handleStreamLive(interaction);
         case 'stream-list':         return handleStreamList(interaction);
+        case 'stream-my':           return handleStreamMy(interaction);
         case 'stream-remove-admin': return handleStreamRemoveAdmin(interaction);
         case 'league-list':         return handleLeagueList(interaction);
         case 'add-league':          return handleAddLeague(interaction);
