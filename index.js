@@ -782,12 +782,6 @@ function buildCommands() {
       .addUserOption(o => o.setName('user').setDescription('[Admin] Check a specific coach instead of yourself').setRequired(false)),
 
     new SlashCommandBuilder()
-      .setName('stream-scan')
-      .setDescription('[Admin] Scan this channel for stream links and register them.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addIntegerOption(o => o.setName('limit').setDescription('How many messages to scan (default 50, max 200)').setRequired(false).setMinValue(1).setMaxValue(200)),
-
-    new SlashCommandBuilder()
       .setName('stream-list')
       .setDescription('Show all registered streamers in this server.'),
 
