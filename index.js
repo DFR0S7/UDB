@@ -2982,14 +2982,8 @@ async function checkYouTubeLive(channelId) {
     if (data.error) { console.error('[youtube] Live search error:', data.error.message); return null; }
     console.log(`[youtube] Live search for ${resolvedChannelId} returned ${data.items?.length ?? 0} result(s)`);
     if (!data.items?.length) {
-      // Search index can lag for very new streams — return channel URL as fallback so post still goes out
-      console.log('[youtube] No live video in search index yet — using channel URL fallback');
-      return {
-        title:        'Live Now',
-        url:          `https://www.youtube.com/@${channelId.replace(/^@/, '')}`,
-        thumbnail:    null,
-        channelTitle: channelId,
-      };
+      console.log('[youtube] No live stream found in search index');
+      return null;
     }
     const item = data.items[0];
     console.log(`[youtube] Live stream found: "${item.snippet.title}"`);
