@@ -2951,34 +2951,79 @@ async function deleteStreamRegistration(guildId, userId, platform) {
 }
 
 async function checkYouTubeLive(channelId) {
-  if (!YOUTUBE_API_KEY) return null;
+  if (!YOUTUBE_API_KEY) { console.error('[youtube] No API key set'); return null; }
 
-  // If it looks like a handle (@username) or channel name, search for it first
   let resolvedChannelId = channelId;
-  if (channelId.startsWith('@') || !channelId.startsWith('UC')) {
+
+  // Resolve handle to UC channel ID using the proper forHandle endpoint
+  if (!channelId.startsWith('UC')) {
     const handle = channelId.startsWith('@') ? channelId.slice(1) : channelId;
-    const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${encodeURIComponent(handle)}&key=${YOUTUBE_API_KEY}&maxResults=1`;
+    // Try channels.list with forHandle first (most accurate)
+    const handleUrl = `https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=${encodeURIComponent(handle)}&key=${YOUTUBE_API_KEY}`;
     try {
-      const res  = await fetch(searchUrl);
+      const res  = await fetch(handleUrl);
       const data = await res.json();
-      if (data.items?.[0]) resolvedChannelId = data.items[0].snippet.channelId;
-    } catch { return null; }
+      if (data.items?.[0]?.id) {
+        resolvedChannelId = data.items[0].id;
+        console.log(`[youtube] Resolved handle "${handle}" → ${resolvedChannelId}`);
+      } else {
+        // Fallback: search by name
+        console.warn(`[youtube] forHandle lookup failed for "${handle}", trying search...`);
+        const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${encodeURIComponent(handle)}&key=${YOUTUBE_API_KEY}&maxResults=1`;
+        const sRes  = await fetch(searchUrl);
+        const sData = await sRes.json();
+        if (sData.items?.[0]) {
+          resolvedChannelId = sData.items[0].snippet.channelId;
+          console.log(`[youtube] Search resolved "${handle}" → ${resolvedChannelId}`);
+        } else {
+          console.warn(`[youtube] Could not resolve handle "${handle}"`);
+          return null;
+        }
+      }
+    } catch (err) { console.error('[youtube] Handle resolution error:', err.message); return null; }
   }
 
-  // Check for live streams on the resolved channel
+  // Step 1: Check liveBroadcastContent on the channel itself — most reliable
+  const channelUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet,status&id=${encodeURIComponent(resolvedChannelId)}&key=${YOUTUBE_API_KEY}`;
+  try {
+    const cRes  = await fetch(channelUrl);
+    const cData = await cRes.json();
+    if (cData.error) { console.error('[youtube] Channel check error:', cData.error.message); return null; }
+    const channel = cData.items?.[0];
+    if (!channel) { console.warn(`[youtube] Channel ${resolvedChannelId} not found`); return null; }
+    const broadcastContent = channel.snippet?.liveBroadcastContent;
+    console.log(`[youtube] Channel ${resolvedChannelId} liveBroadcastContent: ${broadcastContent}`);
+    if (broadcastContent !== 'live') {
+      console.log('[youtube] Channel is not currently live');
+      return null;
+    }
+  } catch (err) { console.error('[youtube] Channel status check error:', err.message); return null; }
+
+  // Step 2: Channel is live — find the active stream video
   const liveUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${encodeURIComponent(resolvedChannelId)}&eventType=live&type=video&key=${YOUTUBE_API_KEY}&maxResults=1`;
   try {
     const res  = await fetch(liveUrl);
     const data = await res.json();
-    if (!data.items?.length) return null;
+    if (data.error) { console.error('[youtube] Live search error:', data.error.message); return null; }
+    if (!data.items?.length) {
+      // Channel is live but search didn't return the video yet — return a generic live result
+      console.log('[youtube] Live confirmed but search index not ready — using channel URL');
+      return {
+        title:        'Live Stream',
+        url:          `https://www.youtube.com/@${channelId}`,
+        thumbnail:    null,
+        channelTitle: channelId,
+      };
+    }
     const item = data.items[0];
+    console.log(`[youtube] Live stream found: "${item.snippet.title}"`);
     return {
-      title:     item.snippet.title,
-      url:       `https://www.youtube.com/watch?v=${item.id.videoId}`,
-      thumbnail: item.snippet.thumbnails?.medium?.url || null,
+      title:        item.snippet.title,
+      url:          `https://www.youtube.com/watch?v=${item.id.videoId}`,
+      thumbnail:    item.snippet.thumbnails?.medium?.url || null,
       channelTitle: item.snippet.channelTitle,
     };
-  } catch { return null; }
+  } catch (err) { console.error('[youtube] Live search error:', err.message); return null; }
 }
 
 // Twitch OAuth token cache
