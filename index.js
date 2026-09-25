@@ -617,13 +617,14 @@ async function getDistinctConferences() {
 // =====================================================
 function buildCommands() {
   return [
+    // ── Standalone (unchanged) ──────────────────────────────────────────────
     new SlashCommandBuilder()
       .setName('setup')
       .setDescription('Interactive bot configuration wizard (Admin only)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
     new SlashCommandBuilder()
-      .setName('config')
+      .setName('view-config')
       .setDescription('Manage bot configuration (Admin only)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .addSubcommand(s => s.setName('view').setDescription('View current configuration'))
@@ -634,6 +635,27 @@ function buildCommands() {
         .addStringOption(o => o.setName('value').setDescription('New value').setRequired(true).setAutocomplete(true))),
 
     new SlashCommandBuilder()
+      .setName('advance')
+      .setDescription('[Admin] Advance the league to the next phase.')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addStringOption(o => o.setName('hours').setDescription('Deadline window for this week').setRequired(true).setAutocomplete(true)),
+
+    new SlashCommandBuilder()
+      .setName('config-wizard')
+      .setDescription('[Admin] Update specific sections of your bot config without redoing full setup.')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+    new SlashCommandBuilder()
+      .setName('reload-commands')
+      .setDescription('[Admin] Force re-register all slash commands with Discord.')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+    new SlashCommandBuilder()
+      .setName('checkpermissions')
+      .setDescription('[Admin] Audit bot permissions across all configured channels.')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+    new SlashCommandBuilder()
       .setName('help')
       .setDescription('Show available commands and features.'),
 
@@ -642,163 +664,126 @@ function buildCommands() {
       .setDescription('View available coaching job offers.'),
 
     new SlashCommandBuilder()
-      .setName('assign-team')
-      .setDescription('[Admin] Assign a team to a coach.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addUserOption(o => o.setName('user').setDescription('Discord user').setRequired(true))
-      .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
-      .addBooleanOption(o => o.setName('skip-announcement').setDescription('Skip signing announcement').setRequired(false)),
-
-    new SlashCommandBuilder()
-      .setName('reset-team')
-      .setDescription('[Admin] Remove a coach from their team.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addUserOption(o => o.setName('user').setDescription('User to reset').setRequired(false))
-      .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(false).setAutocomplete(true)),
-
-    new SlashCommandBuilder()
-      .setName('listteams')
-      .setDescription('[Admin] Post the team availability list.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addStringOption(o => o.setName('filter').setDescription('Filter teams').setRequired(false)
-        .addChoices(
-          { name: 'All Teams',        value: 'all' },
-          { name: 'Assigned Only',    value: 'assigned' },
-          { name: 'Available Only',   value: 'available' },
-          { name: 'Conference View',  value: 'conference_view' },
-        )),
-
-    new SlashCommandBuilder()
-      .setName('move-coach')
-      .setDescription('[Admin] Move a coach from one team to another.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addUserOption(o => o.setName('user').setDescription('Coach to move').setRequired(true))
-      .addStringOption(o => o.setName('new-team').setDescription('Destination team').setRequired(true).setAutocomplete(true)),
-
-    new SlashCommandBuilder()
-      .setName('advance')
-      .setDescription('[Admin] Advance the league to the next phase.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addStringOption(o => o.setName('hours').setDescription('Deadline window for this week').setRequired(true).setAutocomplete(true)),
-
-    new SlashCommandBuilder()
-      .setName('set-phase')
-      .setDescription('[Admin] Manually set the current season, phase, and sub-week.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addIntegerOption(o => o.setName('season').setDescription('Season number').setRequired(false))
-      .addStringOption(o => o.setName('phase').setDescription('Phase key').setRequired(false).setAutocomplete(true))
-      .addIntegerOption(o => o.setName('sub').setDescription('Sub-phase number').setRequired(false)),
-
-    new SlashCommandBuilder()
-      .setName('rollback-advance')
-      .setDescription('[Admin] Roll the league back to a previous season, phase, and week.'),
-
-    new SlashCommandBuilder()
-      .setName('reset-league')
-      .setDescription('[Admin] Reset league data for this server. Use with caution.'),
-
-    new SlashCommandBuilder()
       .setName('current-week')
       .setDescription('Show the current season, phase, and week for this league.'),
 
+    // ── /stream — go live ────────────────────────────────────────────────────
     new SlashCommandBuilder()
-      .setName('team-info')
-      .setDescription('Look up a team — status, rating, assigned coach, and conference.')
-      .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true)),
-
-    new SlashCommandBuilder()
-      .setName('league-list')
-      .setDescription('Show all leagues configured in this server.'),
-
-    new SlashCommandBuilder()
-      .setName('add-league')
-      .setDescription('[Admin] Add a new league to this server (multi-league mode).'),
-
-    new SlashCommandBuilder()
-      .setName('config-wizard')
-      .setDescription('[Admin] Update specific sections of your bot config without redoing full setup.'),
-
-    new SlashCommandBuilder()
-      .setName('conference-setup')
-      .setDescription('[Admin] Set up custom tier/division structure for the team list.'),
-
-    new SlashCommandBuilder()
-      .setName('set-conference')
-      .setDescription('[Admin] Assign a team to a custom conference.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
-      .addStringOption(o => o.setName('conference').setDescription('Conference name (e.g. SEC, B10)').setRequired(true).setAutocomplete(true)),
-
-    new SlashCommandBuilder()
-      .setName('promote-relegate')
-      .setDescription('[Admin] Move a team up or down a tier within their division.'),
-
-    new SlashCommandBuilder()
-      .setName('reload-commands')
-      .setDescription('[Admin] Force re-register all slash commands with Discord.'),
-
-    new SlashCommandBuilder()
-      .setName('checkpermissions')
-      .setDescription('[Admin] Audit bot permissions across all configured channels.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-
-    new SlashCommandBuilder()
-      .setName('stream-register')
-      .setDescription('Register your Twitch or YouTube stream.')
-      .addStringOption(o => o.setName('link').setDescription('Your Twitch or YouTube stream URL (or use handle + platform)').setRequired(false))
-      .addStringOption(o => o.setName('handle').setDescription('Your channel handle or username (e.g. Mr-Dfr0s7)').setRequired(false))
-      .addStringOption(o => o.setName('platform').setDescription('Platform when using handle').setRequired(false)
-        .addChoices(
-          { name: 'YouTube', value: 'youtube' },
-          { name: 'Twitch',  value: 'twitch'  },
-        )),
-
-    new SlashCommandBuilder()
-      .setName('stream-admin')
-      .setDescription('[Admin] Register a stream for a specific user.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addUserOption(o => o.setName('user').setDescription('The coach to register for').setRequired(true))
-      .addStringOption(o => o.setName('link').setDescription('Twitch or YouTube stream URL (or use handle + platform)').setRequired(false))
-      .addStringOption(o => o.setName('handle').setDescription('Channel handle or username (e.g. Mr-Dfr0s7)').setRequired(false))
-      .addStringOption(o => o.setName('platform').setDescription('Platform when using handle').setRequired(false)
-        .addChoices(
-          { name: 'YouTube', value: 'youtube' },
-          { name: 'Twitch',  value: 'twitch'  },
-        )),
-
-    new SlashCommandBuilder()
-      .setName('stream-remove')
-      .setDescription('Remove your stream registration.'),
-
-    new SlashCommandBuilder()
-      .setName('stream-scan')
-      .setDescription('[Admin] Scan this channel for stream links and register them.')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addIntegerOption(o => o.setName('limit').setDescription('How many messages to scan (default 50, max 200)').setRequired(false).setMinValue(10).setMaxValue(200)),
-
-    new SlashCommandBuilder()
-      .setName('stream-live')
+      .setName('stream')
       .setDescription('Check if you are live and post to the streaming channel.')
       .addUserOption(o => o.setName('user').setDescription('[Admin] Check a specific coach instead of yourself').setRequired(false)),
 
+    // ── /config-stream — coach stream management ─────────────────────────────
     new SlashCommandBuilder()
-      .setName('stream-list')
-      .setDescription('Show all registered streamers in this server.'),
+      .setName('config-stream')
+      .setDescription('Manage your stream registration.')
+      .addSubcommand(s => s
+        .setName('register')
+        .setDescription('Register your Twitch or YouTube stream.')
+        .addStringOption(o => o.setName('link').setDescription('Your stream URL (or use handle + platform)').setRequired(false))
+        .addStringOption(o => o.setName('handle').setDescription('Your channel handle or username').setRequired(false))
+        .addStringOption(o => o.setName('platform').setDescription('Platform when using handle').setRequired(false)
+          .addChoices({ name: 'YouTube', value: 'youtube' }, { name: 'Twitch', value: 'twitch' })))
+      .addSubcommand(s => s.setName('my-handle').setDescription('View your stream registrations.'))
+      .addSubcommand(s => s.setName('remove').setDescription('Remove your stream registration.'))
+      .addSubcommand(s => s.setName('list').setDescription('Show all registered streamers in this server.')),
 
+    // ── /admin — all admin subcommand groups ─────────────────────────────────
     new SlashCommandBuilder()
-      .setName('stream-my')
-      .setDescription('View your own stream registrations.'),
-
-    new SlashCommandBuilder()
-      .setName('stream-remove-admin')
-      .setDescription('[Admin] Remove a stream registration for any user.')
+      .setName('admin')
+      .setDescription('Admin commands.')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .addUserOption(o => o.setName('user').setDescription('The coach to remove').setRequired(true))
-      .addStringOption(o => o.setName('platform').setDescription('Platform to remove').setRequired(false)
-        .addChoices(
-          { name: 'YouTube', value: 'youtube' },
-          { name: 'Twitch',  value: 'twitch'  },
-        )),
+
+      // team group
+      .addSubcommandGroup(g => g
+        .setName('team')
+        .setDescription('Team management.')
+        .addSubcommand(s => s
+          .setName('list')
+          .setDescription('Post the team availability list.')
+          .addStringOption(o => o.setName('filter').setDescription('Filter teams').setRequired(false)
+            .addChoices(
+              { name: 'All Teams',        value: 'all' },
+              { name: 'Assigned Only',    value: 'assigned' },
+              { name: 'Available Only',   value: 'available' },
+              { name: 'Conference View',  value: 'conference_view' },
+            )))
+        .addSubcommand(s => s
+          .setName('assign')
+          .setDescription('Assign a team to a coach.')
+          .addUserOption(o => o.setName('user').setDescription('Discord user').setRequired(true))
+          .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
+          .addBooleanOption(o => o.setName('skip-announcement').setDescription('Skip signing announcement').setRequired(false)))
+        .addSubcommand(s => s
+          .setName('reset')
+          .setDescription('Remove a coach from their team.')
+          .addUserOption(o => o.setName('user').setDescription('User to reset').setRequired(false))
+          .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(false).setAutocomplete(true)))
+        .addSubcommand(s => s
+          .setName('move')
+          .setDescription('Move a coach to a different team.')
+          .addUserOption(o => o.setName('user').setDescription('Coach to move').setRequired(true))
+          .addStringOption(o => o.setName('new-team').setDescription('Destination team').setRequired(true).setAutocomplete(true)))
+        .addSubcommand(s => s
+          .setName('set-conference')
+          .setDescription('Assign a team to a custom tier and division.')
+          .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
+          .addStringOption(o => o.setName('conference').setDescription('Conference name').setRequired(true).setAutocomplete(true)))
+        .addSubcommand(s => s
+          .setName('conference-setup')
+          .setDescription('Set up custom tier/division structure for the team list.'))
+        .addSubcommand(s => s
+          .setName('promote-relegate')
+          .setDescription('Move a team up or down a tier within their division.')))
+
+      // season group
+      .addSubcommandGroup(g => g
+        .setName('season')
+        .setDescription('Season management.')
+        .addSubcommand(s => s
+          .setName('set-phase')
+          .setDescription('Manually set the current season, phase, and sub-week.')
+          .addIntegerOption(o => o.setName('season').setDescription('Season number').setRequired(false))
+          .addStringOption(o => o.setName('phase').setDescription('Phase key').setRequired(false).setAutocomplete(true))
+          .addIntegerOption(o => o.setName('sub').setDescription('Sub-phase number').setRequired(false)))
+        .addSubcommand(s => s
+          .setName('rollback')
+          .setDescription('Roll the league back to a previous season, phase, and week.'))
+        .addSubcommand(s => s
+          .setName('reset')
+          .setDescription('Reset league data for this server. Use with caution.')))
+
+      // league group
+      .addSubcommandGroup(g => g
+        .setName('league')
+        .setDescription('Multi-league management.')
+        .addSubcommand(s => s.setName('add').setDescription('Add a new league to this server.'))
+        .addSubcommand(s => s.setName('list').setDescription('Show all leagues in this server.'))
+        .addSubcommand(s => s.setName('config').setDescription('Open the config wizard.')))
+
+      // stream group
+      .addSubcommandGroup(g => g
+        .setName('stream')
+        .setDescription('Admin stream management.')
+        .addSubcommand(s => s
+          .setName('register')
+          .setDescription('Register a stream for a specific user.')
+          .addUserOption(o => o.setName('user').setDescription('The coach to register for').setRequired(true))
+          .addStringOption(o => o.setName('link').setDescription('Stream URL').setRequired(false))
+          .addStringOption(o => o.setName('handle').setDescription('Channel handle or username').setRequired(false))
+          .addStringOption(o => o.setName('platform').setDescription('Platform when using handle').setRequired(false)
+            .addChoices({ name: 'YouTube', value: 'youtube' }, { name: 'Twitch', value: 'twitch' })))
+        .addSubcommand(s => s
+          .setName('remove')
+          .setDescription('Remove a stream registration for any user.')
+          .addUserOption(o => o.setName('user').setDescription('The coach to remove (if still in server)').setRequired(false))
+          .addStringOption(o => o.setName('user_id').setDescription('Discord user ID (for users no longer in server)').setRequired(false))
+          .addStringOption(o => o.setName('platform').setDescription('Platform to remove (blank = remove all)').setRequired(false)
+            .addChoices({ name: 'YouTube', value: 'youtube' }, { name: 'Twitch', value: 'twitch' })))
+        .addSubcommand(s => s
+          .setName('scan')
+          .setDescription('Scan this channel for stream links and register them.')
+          .addIntegerOption(o => o.setName('limit').setDescription('How many messages to scan (default 50, max 200)').setRequired(false).setMinValue(10).setMaxValue(200)))),
 
   ].map(cmd => cmd.toJSON());
 }
@@ -2925,7 +2910,7 @@ function parseStreamLink(link) {
   if (ytHandleMatch) return { platform: 'youtube', channelId: ytHandleMatch[1] };
 
   // Twitch
-  const ttMatch = clean.match(/twitch\.tv\/([a-zA-Z0-9_]+)/i);
+  const ttMatch = clean.match(/twitch\.tv\/(?!videos\/)([a-zA-Z0-9_]+)/i);
   if (ttMatch) return { platform: 'twitch', channelId: ttMatch[1] };
 
   return null;
@@ -3191,7 +3176,7 @@ async function handleStreamLive(interaction) {
   if (!regs.length) return interaction.editReply({
     content: targetUser
       ? `❌ <@${userId}> has no stream registered in this server.`
-      : '❌ You have no stream registered. Run `/stream-register` with your Twitch or YouTube link first.',
+      : '❌ You have no stream registered. Run `/config-stream register` with your Twitch or YouTube link first.',
   });
 
   const streamingChannel = findTextChannel(interaction.guild, config.channel_streaming);
@@ -3277,24 +3262,27 @@ async function handleStreamRemoveAdmin(interaction) {
   if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
 
   const target   = interaction.options.getUser('user');
+  const userId   = interaction.options.getString('user_id')?.trim();
   const platform = interaction.options.getString('platform');
 
-  const regs = await listStreamRegistrations(guildId, target.id);
-  if (!regs.length) return interaction.editReply({ content: `❌ <@${target.id}> has no stream registrations in this server.` });
+  if (!target && !userId) return interaction.editReply({ content: '❌ Please provide either a **user** or a **user_id**.' });
+  const targetId = target ? target.id : userId;
+
+  const regs = await listStreamRegistrations(guildId, targetId);
+  if (!regs.length) return interaction.editReply({ content: `❌ No stream registrations found for <@${targetId}> in this server.` });
 
   if (platform) {
-    // Remove specific platform
     const match = regs.find(r => r.platform === platform);
-    if (!match) return interaction.editReply({ content: `❌ <@${target.id}> has no ${platform} registration.` });
-    await deleteStreamRegistration(guildId, target.id, platform);
-    return interaction.editReply({ content: `✅ Removed <@${target.id}>'s ${platform} registration (\`${match.channel_id}\`).` });
+    if (!match) return interaction.editReply({ content: `❌ No ${platform} registration found for <@${targetId}>.` });
+    await deleteStreamRegistration(guildId, targetId, platform);
+    return interaction.editReply({ content: `✅ Removed <@${targetId}>'s ${platform} registration (\`${match.channel_id}\`).` });
   }
 
   // Remove all registrations for that user
   for (const reg of regs) {
-    await deleteStreamRegistration(guildId, target.id, reg.platform);
+    await deleteStreamRegistration(guildId, targetId, reg.platform);
   }
-  await interaction.editReply({ content: `✅ Removed all stream registrations for <@${target.id}>.` });
+  await interaction.editReply({ content: `✅ Removed all stream registrations for <@${targetId}>.` });
 }
 
 // /stream-scan ────────────────────────────────────────────────────────────
@@ -3323,7 +3311,7 @@ async function handleStreamScan(interaction) {
     return interaction.editReply({ content: `❌ Could not read messages: ${err.message}` });
   }
 
-  const streamRegex = /https?:\/\/(?:www\.)?(?:twitch\.tv\/[a-zA-Z0-9_]+|youtube\.com\/(?:@[a-zA-Z0-9_\-]+|live\/[a-zA-Z0-9_\-]+|watch\?v=[a-zA-Z0-9_\-]+|channel\/[a-zA-Z0-9_\-]+|c\/[a-zA-Z0-9_\-]+)|youtu\.be\/[a-zA-Z0-9_\-]+)/gi;
+  const streamRegex = /https?:\/\/(?:www\.)?(?:twitch\.tv\/(?!videos\/)[a-zA-Z0-9_]+|youtube\.com\/(?:@[a-zA-Z0-9_\-]+|live\/[a-zA-Z0-9_\-]+|watch\?v=[a-zA-Z0-9_\-]+|channel\/[a-zA-Z0-9_\-]+|c\/[a-zA-Z0-9_\-]+)|youtu\.be\/[a-zA-Z0-9_\-]+)/gi;
 
   const found   = [];
   const seenLinks = new Set();
@@ -3396,7 +3384,7 @@ async function handleStreamMy(interaction) {
 
   const regs = await listStreamRegistrations(guildId, userId);
   if (!regs.length) return interaction.editReply({
-    content: '❌ You have no stream registered. Use `/stream-register` with your Twitch or YouTube link.',
+    content: '❌ You have no stream registered. Use `/config-stream register` with your Twitch or YouTube link.',
   });
 
   const lines = regs.map(r => {
@@ -4820,7 +4808,7 @@ async function handleAutocomplete(interaction) {
 
   try {
 
-  if (commandName === 'assign-team' || commandName === 'any-game-result' || commandName === 'team-info') {
+  if (commandName === 'admin' && interaction.options.getSubcommandGroup() === 'team' && ['assign','reset','move'].includes(interaction.options.getSubcommand())) {
     const { data: teams, error } = await supabase
       .from('teams')
       .select('id, team_name, conference, star_rating')
@@ -4834,7 +4822,7 @@ async function handleAutocomplete(interaction) {
       value: t.team_name,
     }));
 
-  } else if (commandName === 'move-coach') {
+  } else if (commandName === 'admin' && interaction.options.getSubcommandGroup() === 'team' && interaction.options.getSubcommand() === 'move') {
     if (focused.name === 'coach') {
       const { data: assignments, error } = await supabase
         .from('team_assignments')
@@ -4900,7 +4888,7 @@ async function handleAutocomplete(interaction) {
         value: t.team_name,
       }));
 
-  } else if (commandName === 'resetteam' && focused.name === 'team') {
+  } else if (commandName === 'admin' && interaction.options.getSubcommandGroup() === 'team' && interaction.options.getSubcommand() === 'reset' && focused.name === 'team') {
     // Only autocomplete the team option — show assigned teams only
     const { data: assignments, error: aErr } = await supabase
       .from('team_assignments')
@@ -4926,7 +4914,7 @@ async function handleAutocomplete(interaction) {
       }));
     }
 
-  } else if (commandName === 'set-conference') {
+  } else if (commandName === 'admin' && interaction.options.getSubcommandGroup() === 'team' && interaction.options.getSubcommand() === 'set-conference') {
     // Fetch all custom conferences for this guild regardless of league_id
     const { data: allConfs } = await supabase
       .from('custom_conferences')
@@ -4961,7 +4949,20 @@ async function handleAutocomplete(interaction) {
       choices = [24, 48].map(h => ({ name: `${h} Hours`, value: String(h) }));
     }
 
-  } else if (commandName === 'config' && focused.name === 'setting') {
+  } else if (commandName === 'config-stream' && interaction.options.getSubcommand() === 'register') {
+    // No autocomplete needed for link/handle/platform — choices are static
+
+  } else if (commandName === 'admin' && interaction.options.getSubcommandGroup() === 'season' && interaction.options.getSubcommand() === 'set-phase') {
+    if (focused.name === 'phase') {
+      const phases = [
+        'preseason','regular','conf_champ','bowl',
+        'end_of_season_recap','players_leaving','transfer_portal',
+        'position_changes','training_results','encourage_transfers',
+      ];
+      choices = phases.filter(p => p.includes(query)).map(p => ({ name: p, value: p }));
+    }
+
+  } else if (commandName === 'view-config' && focused.name === 'setting') {
     const allSettings = [
       { label: 'League Name',             key: 'league_name',                hint: 'League display name' },
       { label: 'League Abbreviation',     key: 'league_abbreviation',        hint: 'Short name for your league' },
@@ -4987,7 +4988,7 @@ async function handleAutocomplete(interaction) {
       .slice(0, 25)
       .map(s => ({ name: `${s.label} — ${s.hint}`, value: s.key }));
 
-  } else if (commandName === 'config' && focused.name === 'value') {
+  } else if (commandName === 'view-config' && focused.name === 'value') {
     const setting = interaction.options.getString('setting') || '';
     const guild   = client.guilds.cache.get(guildId);
 
@@ -5066,44 +5067,74 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isChatInputCommand()) {
       switch (interaction.commandName) {
-        case 'setup':             return handleSetup(interaction);
-        case 'help':              return handleHelp(interaction);
-        case 'checkpermissions':  return handleCheckPermissions(interaction);
-        case 'job-offers':        return handleJobOffers(interaction);
-        case 'assign-team':       return handleAssignTeam(interaction);
-        case 'reset-team':        return handleResetTeam(interaction);
-        case 'listteams':         return handleListTeams(interaction);
-        case 'advance':           return handleAdvance(interaction);
-        case 'set-phase':          return handleSetPhase(interaction);
-        case 'reload-commands':    return handleReloadCommands(interaction);
-        case 'rollback-advance':   return handleRollbackAdvance(interaction);
-        case 'reset-league':        return handleResetLeague(interaction);
-        case 'config-wizard':       return handleConfigWizard(interaction);
-        case 'conference-setup':    return handleConferenceSetup(interaction);
-        case 'set-conference':      return handleSetConference(interaction);
-        case 'promote-relegate':    return handlePromoteRelegate(interaction);
-        case 'current-week':        return handleCurrentWeek(interaction);
-        case 'team-info':           return handleTeamInfo(interaction);
-        case 'stream-register':     return handleStreamRegister(interaction);
-        case 'stream-admin':        return handleStreamAdmin(interaction);
-        case 'stream-remove':       return handleStreamRemove(interaction);
-        case 'stream-scan':         return handleStreamScan(interaction);
-        case 'stream-live':         return handleStreamLive(interaction);
-        case 'stream-scan':         return handleStreamScan(interaction);
-        case 'stream-list':         return handleStreamList(interaction);
-        case 'stream-my':           return handleStreamMy(interaction);
-        case 'stream-remove-admin': return handleStreamRemoveAdmin(interaction);
-        case 'league-list':         return handleLeagueList(interaction);
-        case 'add-league':          return handleAddLeague(interaction);
-        case 'move-coach':        return handleMoveCoach(interaction);
-        case 'config':
+
+        // ── Standalone ──────────────────────────────────────────────────────
+        case 'setup':           return handleSetup(interaction);
+        case 'help':            return handleHelp(interaction);
+        case 'checkpermissions':return handleCheckPermissions(interaction);
+        case 'job-offers':      return handleJobOffers(interaction);
+        case 'advance':         return handleAdvance(interaction);
+        case 'reload-commands': return handleReloadCommands(interaction);
+        case 'config-wizard':   return handleConfigWizard(interaction);
+        case 'current-week':    return handleCurrentWeek(interaction);
+
+        // ── /view-config ────────────────────────────────────────────────────
+        case 'view-config':
           switch (interaction.options.getSubcommand()) {
             case 'view':     return handleConfigView(interaction);
             case 'features': return handleConfigFeatures(interaction);
             case 'edit':     return handleConfigEdit(interaction);
-            case 'reload':     return handleConfigReload(interaction);
+            case 'reload':   return handleConfigReload(interaction);
           }
           break;
+
+        // ── /stream — go live ────────────────────────────────────────────────
+        case 'stream': return handleStreamLive(interaction);
+
+        // ── /config-stream — coach stream management ─────────────────────────
+        case 'config-stream':
+          switch (interaction.options.getSubcommand()) {
+            case 'register':   return handleStreamRegister(interaction);
+            case 'my-handle':  return handleStreamMy(interaction);
+            case 'remove':     return handleStreamRemove(interaction);
+            case 'list':       return handleStreamList(interaction);
+          }
+          break;
+
+        // ── /admin — all admin subcommand groups ─────────────────────────────
+        case 'admin': {
+          const group = interaction.options.getSubcommandGroup();
+          const sub   = interaction.options.getSubcommand();
+
+          if (group === 'team') {
+            if (sub === 'list')              return handleListTeams(interaction);
+            if (sub === 'assign')            return handleAssignTeam(interaction);
+            if (sub === 'reset')             return handleResetTeam(interaction);
+            if (sub === 'move')              return handleMoveCoach(interaction);
+            if (sub === 'set-conference')    return handleSetConference(interaction);
+            if (sub === 'conference-setup')  return handleConferenceSetup(interaction);
+            if (sub === 'promote-relegate')  return handlePromoteRelegate(interaction);
+          }
+
+          if (group === 'season') {
+            if (sub === 'set-phase')  return handleSetPhase(interaction);
+            if (sub === 'rollback')   return handleRollbackAdvance(interaction);
+            if (sub === 'reset')      return handleResetLeague(interaction);
+          }
+
+          if (group === 'league') {
+            if (sub === 'add')    return handleAddLeague(interaction);
+            if (sub === 'list')   return handleLeagueList(interaction);
+            if (sub === 'config') return handleConfigWizard(interaction);
+          }
+
+          if (group === 'stream') {
+            if (sub === 'register') return handleStreamAdmin(interaction);
+            if (sub === 'remove')   return handleStreamRemoveAdmin(interaction);
+            if (sub === 'scan')     return handleStreamScan(interaction);
+          }
+          break;
+        }
       }
     }
 
