@@ -67,6 +67,7 @@ const PHASE_CYCLE = [
   { key: 'preseason',           name: 'Preseason',               subWeeks: 1,  startSub: 0, format: ()    => 'Preseason' },
   { key: 'regular',             name: 'Regular Season',          subWeeks: 15, startSub: 0, format: (sub) => `Week ${sub}` },
   { key: 'conf_champ',          name: 'Conference Championship', subWeeks: 1,  startSub: 0, format: ()    => 'Conference Championship' },
+  { key: 'week_16',              name: 'Week 16',                 subWeeks: 1,  startSub: 0, format: ()    => 'Week 16' },
   { key: 'bowl',                name: 'Bowl Season',             subWeeks: 4,  startSub: 0, format: (sub) => {
     const labels = ['Bowl Week 1', 'Bowl Week 2', 'Semifinals', 'National Championship'];
     return labels[sub] ?? `Bowl Week ${sub + 1}`;
@@ -2456,6 +2457,33 @@ async function handleAdvance(interaction) {
     { triggerSub: 13, weekLabel: 'Week 14', continueId: 'advance_continue14', skipId: 'advance_skip14' },
   ];
 
+  // Week 16 skip prompt — fires when advancing from conf_champ
+  if (currentPhase === 'conf_champ') {
+    const skipRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('advance_continue16').setLabel('▶️ Continue to Week 16').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('advance_skip16').setLabel('⏭️ Skip to Bowl Season').setStyle(ButtonStyle.Secondary),
+    );
+    const promptMsg = await interaction.editReply({
+      content: '**Week 16** — Does your league play Week 16 after Conference Championship?',
+      components: [skipRow],
+    });
+    try {
+      const btn = await promptMsg.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 120000 });
+      await btn.update({ components: [] });
+      if (btn.customId === 'advance_skip16') {
+        // Skip week_16 and go straight to bowl
+        const bowlIdx = PHASE_CYCLE.findIndex(p => p.key === 'bowl');
+        newPhase = PHASE_CYCLE[bowlIdx].key;
+        newSub   = 0;
+        console.log(`[advance] Skipped Week 16 → Bowl Season`);
+      }
+      // else continue normally through week_16
+    } catch {
+      await interaction.editReply({ content: '⏰ No response in 2 minutes — advance cancelled. Run `/advance` again when ready.', components: [] });
+      return;
+    }
+  }
+
   for (const { triggerSub, weekLabel, continueId, skipId } of skipWeekPrompts) {
     if (currentPhase === 'regular' && currentSub === triggerSub) {
       const skipRow = new ActionRowBuilder().addComponents(
@@ -2669,6 +2697,7 @@ async function handleRollbackAdvance(interaction) {
       { id: 'preseason',  label: 'Preseason' },
       { id: 'regular',    label: 'Regular Season', style: ButtonStyle.Primary },
       { id: 'conf_champ', label: 'Conference Championship' },
+      { id: 'week_16',    label: 'Week 16' },
       { id: 'bowl',       label: 'Bowl Season' },
       { id: 'offseason',  label: 'Offseason' },
     ]
@@ -4949,7 +4978,7 @@ async function handleAutocomplete(interaction) {
   } else if (commandName === 'admin' && interaction.options.getSubcommandGroup() === 'season' && interaction.options.getSubcommand() === 'set-phase') {
     if (focused.name === 'phase') {
       const phases = [
-        'preseason','regular','conf_champ','bowl',
+        'preseason','regular','conf_champ','week_16','bowl',
         'end_of_season_recap','players_leaving','transfer_portal',
         'position_changes','training_results','encourage_transfers',
       ];
