@@ -3226,7 +3226,13 @@ async function handleStreamLive(interaction) {
     if (live.thumbnail) embed.setThumbnail(live.thumbnail);
     if (live.viewerCount != null) embed.addFields({ name: '👥 Viewers', value: String(live.viewerCount), inline: true });
 
-    await streamingChannel.send({ content: '@here', embeds: [embed] });
+    try {
+      await streamingChannel.send({ content: '@here', embeds: [embed] });
+    } catch (sendErr) {
+      console.error(`[stream] Failed to post to streaming channel:`, sendErr.message);
+      await interaction.editReply({ content: `❌ Found your stream but couldn't post to ${streamingChannel} — the bot is missing permissions in that channel. Ask an admin to check the bot's channel permissions.` });
+      return;
+    }
     await interaction.editReply({ content: `✅ Posted your stream to ${streamingChannel}!` });
     setTimeout(() => interaction.deleteReply().catch(() => {}), 8000);
     posted = true;
