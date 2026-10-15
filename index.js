@@ -3003,26 +3003,25 @@ async function checkYouTubeLive(channelId) {
     } catch (err) { console.error('[youtube] Handle resolution error:', err.message); return null; }
   }
 
-  // Search for active live stream directly — liveBroadcastContent from channels API is unreliable
-  const liveUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${encodeURIComponent(resolvedChannelId)}&eventType=live&type=video&key=${YOUTUBE_API_KEY}&maxResults=1`;
+  // Check live status via channels API — more reliable than search index
+  const statusUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet,status&id=${encodeURIComponent(resolvedChannelId)}&key=${YOUTUBE_API_KEY}`;
   try {
-    const res  = await fetch(liveUrl);
+    const res  = await fetch(statusUrl);
     const data = await res.json();
-    if (data.error) { console.error('[youtube] Live search error:', data.error.message); return null; }
-    console.log(`[youtube] Live search for ${resolvedChannelId} returned ${data.items?.length ?? 0} result(s)`);
-    if (!data.items?.length) {
-      console.log('[youtube] No live stream found in search index');
-      return null;
-    }
-    const item = data.items[0];
-    console.log(`[youtube] Live stream found: "${item.snippet.title}"`);
+    if (data.error) { console.error('[youtube] Channel status error:', data.error.message); return null; }
+    const channel = data.items?.[0];
+    if (!channel) { console.log('[youtube] Channel not found'); return null; }
+    const handle = channelId.startsWith('@') ? channelId : `@${channelId}`;
+    const channelTitle = channel.snippet?.title || channelId;
+    // Return profile URL — viewer clicks in to the live stream (same UX as Twitch)
+    console.log(`[youtube] Returning channel profile for ${channelTitle}`);
     return {
-      title:        item.snippet.title,
-      url:          `https://www.youtube.com/watch?v=${item.id.videoId}`,
-      thumbnail:    item.snippet.thumbnails?.medium?.url || null,
-      channelTitle: item.snippet.channelTitle,
+      title:        `${channelTitle} is Live on YouTube`,
+      url:          `https://www.youtube.com/${handle}/live`,
+      thumbnail:    channel.snippet?.thumbnails?.medium?.url || null,
+      channelTitle: channelTitle,
     };
-  } catch (err) { console.error('[youtube] Live search error:', err.message); return null; }
+  } catch (err) { console.error('[youtube] Channel status error:', err.message); return null; }
 }
 
 
