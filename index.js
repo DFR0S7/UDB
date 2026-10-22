@@ -372,6 +372,7 @@ async function getAllTeams(guildId, leagueId = null) {
     user_id:              assignMap[t.id]?.user_id              || null,
     assignment_id:        assignMap[t.id]?.id                  || null,
     custom_conference_id: assignMap[t.id]?.custom_conference_id || null,
+    conference_override:  assignMap[t.id]?.conference_override  || null,
   }));
 }
 
@@ -730,6 +731,11 @@ function buildCommands() {
           .setDescription('Assign a team to a custom tier and division.')
           .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
           .addStringOption(o => o.setName('conference').setDescription('Conference name').setRequired(true).setAutocomplete(true)))
+        .addSubcommand(s => s
+          .setName('override-conference')
+          .setDescription('Override the conference a team displays under for this server only.')
+          .addStringOption(o => o.setName('team').setDescription('Team name').setRequired(true).setAutocomplete(true))
+          .addStringOption(o => o.setName('conference').setDescription('Conference name to display (leave blank to clear override)').setRequired(false)))
         .addSubcommand(s => s
           .setName('conference-setup')
           .setDescription('Set up custom tier/division structure for the team list.'))
@@ -2210,7 +2216,7 @@ async function postTeamList(guild, guildId, config, filterOverride = null) {
 
   const minRating = config.star_rating_for_offers     || 0;
   const maxRating = config.star_rating_max_for_offers || 999;
-  const filter    = filterOverride || config.team_list_filter || 'all';
+  const filter    = filterOverride || config.team_list_filter || 'assigned';
 
   // Apply filter
   let teams = allTeams.filter(t => t.user_id || (t.star_rating != null && parseFloat(t.star_rating) >= minRating && parseFloat(t.star_rating) <= maxRating));
@@ -2299,7 +2305,7 @@ async function postTeamList(guild, guildId, config, filterOverride = null) {
     // ── Standard conference display ─────────────────────────────────────────
     const confMap = {};
     for (const t of teams) {
-      const conf = t.conference || 'Independent';
+      const conf = t.conference_override || t.conference || 'Independent';
       if (!confMap[conf]) confMap[conf] = [];
       confMap[conf].push(t);
     }
@@ -3666,7 +3672,7 @@ async function handleConfigWizard(interaction) {
     }
 
     if (id === 'wiz_set_teamlist') {
-      const current = config.team_list_filter || 'all';
+      const current = config.team_list_filter || 'assigned';
       await btn.update({
         content: `✏️ **Team List Filter** — Current: **${current}**
 Pick a new default:`,
@@ -4208,6 +4214,45 @@ async function handleSetConference(interaction) {
 
   await setTeamCustomConference(team.id, guildId, slot.id);
   await interaction.editReply({ content: `✅ **${team.team_name}** assigned to **${slot.tier_name} — ${slot.division_name}**.` });
+  await postTeamList(interaction.guild, guildId, config);
+}
+
+// /admin team override-conference ─────────────────────────────────────────
+async function handleOverrideConference(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const guildId = interaction.guildId;
+  const config  = await getConfig(guildId);
+  const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.ManageGuild);
+  if (!isAdmin) return interaction.editReply({ content: '❌ Admin only.' });
+
+  const teamName   = interaction.options.getString('team');
+  const conference = interaction.options.getString('conference') || null;
+
+  // Find the team
+  const { data: team } = await supabase.from('teams').select('id, team_name, conference')
+    .ilike('team_name', teamName).maybeSingle();
+  if (!team) return interaction.editReply({ content: `❌ Team not found: **${teamName}**` });
+
+  if (conference === null) {
+    // Clear the override — restore default conference
+    const { error } = await supabase.from('team_assignments')
+      .update({ conference_override: null })
+      .eq('team_id', team.id)
+      .eq('guild_id', guildId);
+    if (error) return interaction.editReply({ content: `❌ Database error: ${error.message}` });
+    await interaction.editReply({ content: `✅ Conference override cleared for **${team.team_name}**. It will now show under **${team.conference || 'Independent'}** (default).` });
+  } else {
+    // Upsert the assignment row with the override
+    const { error } = await supabase.from('team_assignments')
+      .upsert(
+        { team_id: team.id, guild_id: guildId, conference_override: conference },
+        { onConflict: 'team_id,guild_id' }
+      );
+    if (error) return interaction.editReply({ content: `❌ Database error: ${error.message}` });
+    await interaction.editReply({ content: `✅ **${team.team_name}** will now display under **${conference}** in this server's team list.\n*(Default conference: ${team.conference || 'Independent'})*` });
+  }
+
+  // Refresh team list
   await postTeamList(interaction.guild, guildId, config);
 }
 
@@ -4836,7 +4881,7 @@ async function handleAutocomplete(interaction) {
 
   try {
 
-  if (commandName === 'admin' && interaction.options.getSubcommandGroup() === 'team' && ['assign','reset','move'].includes(interaction.options.getSubcommand())) {
+  if (commandName === 'admin' && interaction.options.getSubcommandGroup() === 'team' && ['assign','reset','move','override-conference'].includes(interaction.options.getSubcommand())) {
     const { data: teams, error } = await supabase
       .from('teams')
       .select('id, team_name, conference, star_rating')
@@ -5135,13 +5180,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const sub   = interaction.options.getSubcommand();
 
           if (group === 'team') {
-            if (sub === 'list')              return handleListTeams(interaction);
-            if (sub === 'assign')            return handleAssignTeam(interaction);
-            if (sub === 'reset')             return handleResetTeam(interaction);
-            if (sub === 'move')              return handleMoveCoach(interaction);
-            if (sub === 'set-conference')    return handleSetConference(interaction);
-            if (sub === 'conference-setup')  return handleConferenceSetup(interaction);
-            if (sub === 'promote-relegate')  return handlePromoteRelegate(interaction);
+            if (sub === 'list')                return handleListTeams(interaction);
+            if (sub === 'assign')              return handleAssignTeam(interaction);
+            if (sub === 'reset')               return handleResetTeam(interaction);
+            if (sub === 'move')                return handleMoveCoach(interaction);
+            if (sub === 'set-conference')      return handleSetConference(interaction);
+            if (sub === 'override-conference') return handleOverrideConference(interaction);
+            if (sub === 'conference-setup')    return handleConferenceSetup(interaction);
+            if (sub === 'promote-relegate')    return handlePromoteRelegate(interaction);
           }
 
           if (group === 'season') {
