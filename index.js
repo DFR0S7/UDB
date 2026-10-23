@@ -4233,8 +4233,19 @@ async function handleOverrideConference(interaction) {
     .ilike('team_name', teamName).maybeSingle();
   if (!team) return interaction.editReply({ content: `❌ Team not found: **${teamName}**` });
 
+  // Check if a row already exists for this team in this guild
+  const { data: existing } = await supabase.from('team_assignments')
+    .select('id')
+    .eq('team_id', team.id)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
   if (conference === null) {
     // Clear the override — restore default conference
+    if (!existing) {
+      // No row exists, nothing to clear
+      return interaction.editReply({ content: `ℹ️ **${team.team_name}** has no override set — it's already showing under **${team.conference || 'Independent'}** (default).` });
+    }
     const { error } = await supabase.from('team_assignments')
       .update({ conference_override: null })
       .eq('team_id', team.id)
@@ -4242,12 +4253,18 @@ async function handleOverrideConference(interaction) {
     if (error) return interaction.editReply({ content: `❌ Database error: ${error.message}` });
     await interaction.editReply({ content: `✅ Conference override cleared for **${team.team_name}**. It will now show under **${team.conference || 'Independent'}** (default).` });
   } else {
-    // Upsert the assignment row with the override
-    const { error } = await supabase.from('team_assignments')
-      .upsert(
-        { team_id: team.id, guild_id: guildId, conference_override: conference },
-        { onConflict: 'team_id,guild_id' }
-      );
+    let error;
+    if (existing) {
+      // Row exists — just update the override
+      ({ error } = await supabase.from('team_assignments')
+        .update({ conference_override: conference })
+        .eq('team_id', team.id)
+        .eq('guild_id', guildId));
+    } else {
+      // No row yet — insert one (user_id left null; requires nullable column)
+      ({ error } = await supabase.from('team_assignments')
+        .insert({ team_id: team.id, guild_id: guildId, conference_override: conference }));
+    }
     if (error) return interaction.editReply({ content: `❌ Database error: ${error.message}` });
     await interaction.editReply({ content: `✅ **${team.team_name}** will now display under **${conference}** in this server's team list.\n*(Default conference: ${team.conference || 'Independent'})*` });
   }
